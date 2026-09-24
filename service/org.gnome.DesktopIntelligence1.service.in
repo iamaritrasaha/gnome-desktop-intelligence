@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=org.gnome.DesktopIntelligence1
+Exec=/usr/bin/python3 "@SERVICE_PATH@"

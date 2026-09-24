@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.gdi"
+          path="/org/gnome/shell/extensions/gdi/">
+    <key name="shortcut" type="as">
+      <default>[ '&lt;Control&gt;&lt;Super&gt;space' ]</default>
+      <summary>Intelligence palette shortcut</summary>
+      <description>Global keyboard shortcut used to open or dismiss the palette.</description>
+    </key>
+    <key name="model-endpoint" type="s">
+      <default>'http://localhost:11434'</default>
+      <summary>Model provider endpoint</summary>
+      <description>Endpoint for the configured local model provider.</description>
+    </key>
+    <key name="model-provider" type="s">
+      <default>'ollama'</default>
+      <summary>Model provider</summary>
+      <description>Backend-neutral provider identifier used by the local provider registry.</description>
+    </key>
+    <key name="model-quick-writing" type="s">
+      <default>'LiquidAI/lfm2.5-1.2b-instruct:q4_k_m'</default>
+      <summary>Quick writing model</summary>
+      <description>Configurable model for short text transformations.</description>
+    </key>
+    <key name="model-intent-routing" type="s">
+      <default>'ministral-3:3b'</default>
+      <summary>Intent routing model</summary>
+      <description>Configurable model reserved for future structured system and tool actions.</description>
+    </key>
+    <key name="model-assistant" type="s">
+      <default>'qwen3.5:4b'</default>
+      <summary>Assistant model</summary>
+      <description>Configurable model for explanations and summaries.</description>
+    </key>
+    <key name="model-reasoning" type="s">
+      <default>'qwen3.5:4b'</default>
+      <summary>Reasoning model</summary>
+      <description>Configurable model for questions requiring deeper reasoning.</description>
+    </key>
+    <key name="request-timeout" type="i">
+      <default>120</default><range min="5" max="600"/>
+      <summary>Request timeout in seconds</summary>
+    </key>
+    <key name="context-tokens" type="i">
+      <default>8192</default><range min="2048" max="32768"/>
+      <summary>Model context token limit</summary>
+    </key>
+    <key name="output-tokens" type="i">
+      <default>1024</default><range min="64" max="4096"/>
+      <summary>Maximum generated tokens</summary>
+    </key>
+    <key name="enable-passive-writing" type="b">
+      <default>false</default><summary>Passive writing assistance</summary>
+      <description>Offer local corrections after a completed sentence and typing pause in supported editable fields.</description>
+    </key>
+    <key name="passive-tab-accept" type="b">
+      <default>false</default><summary>Use Tab for visible corrections in supported prose editors</summary>
+    </key>
+    <key name="passive-debounce-ms" type="i">
+      <default>800</default><range min="600" max="2000"/><summary>Passive typing pause in milliseconds</summary>
+    </key>
+    <key name="passive-accept-key" type="as"><default>['&lt;Control&gt;&lt;Alt&gt;Return']</default><summary>Accept visible correction</summary></key>
+    <key name="passive-tab-key" type="as"><default>['Tab']</default><summary>Optional correction acceptance</summary></key>
+    <key name="passive-dismiss-key" type="as"><default>['Escape']</default><summary>Dismiss visible correction</summary></key>
+    <key name="passive-undo-key" type="as"><default>['&lt;Control&gt;&lt;Alt&gt;z']</default><summary>Undo current GDI correction</summary></key>
+    <key name="retain-learning-examples" type="b">
+      <default>false</default><summary>Save accepted and edited text examples locally</summary>
+      <description>Requires personalization. Retain short source, suggestion and final edits for a future local dataset. Turning this off deletes saved examples.</description>
+    </key>
+    <key name="enable-learning" type="b">
+      <default>false</default>
+      <summary>Store local writing signals</summary>
+      <description>Store action names and accepted or rejected outcomes locally, without text.</description>
+    </key>
+  </schema>
+</schemalist>

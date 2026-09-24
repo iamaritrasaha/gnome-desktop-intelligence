@@ -1,0 +1,169 @@
+#gdi-overlay {
+  background-color: transparent;
+}
+
+#gdi-palette {
+  padding: 6px;
+  spacing: 0;
+}
+
+.gdi-search-row {
+  min-height: 40px;
+  padding: 0 8px 2px;
+  spacing: 10px;
+}
+
+.gdi-search-icon {
+  opacity: 0.85;
+}
+
+.gdi-search-entry,
+.gdi-search-entry:focus {
+  width: auto;
+  min-width: 0;
+  min-height: 38px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  background-color: transparent;
+  color: inherit;
+  caret-color: inherit;
+  font-size: 1.05em;
+}
+
+.gdi-search-entry StLabel.hint-text {
+  color: inherit;
+}
+
+.gdi-results-scroll {
+  max-height: 194px;
+}
+
+.gdi-results-scroll-compact {
+  max-height: 194px;
+}
+
+.gdi-results-scroll-short {
+  max-height: 164px;
+}
+
+.gdi-results-scroll-tiny {
+  max-height: 108px;
+}
+
+.gdi-results {
+  padding: 2px 0 0;
+  spacing: 1px;
+}
+
+.gdi-result-row {
+  min-height: 44px;
+  padding: 0 8px;
+  spacing: 0;
+}
+
+.gdi-result-row-with-detail {
+  min-height: 48px;
+}
+
+.gdi-result-content {
+  spacing: 10px;
+}
+
+.gdi-result-icon {
+  opacity: 0.94;
+}
+
+.gdi-result-labels {
+  spacing: 1px;
+}
+
+.gdi-result-title {
+  font-size: 1em;
+  font-weight: 600;
+}
+
+.gdi-result-description {
+  opacity: 0.68;
+  font-size: 0.82em;
+}
+
+.gdi-result-type {
+  max-width: 64px;
+  padding-left: 8px;
+  opacity: 0.68;
+  font-size: 0.78em;
+}
+
+.gdi-status-item {
+  opacity: 0.78;
+}
+
+.gdi-ai-mode {
+  spacing: 2px;
+}
+
+.gdi-writing-view {
+  spacing: 8px;
+}
+
+.gdi-writing-scroll {
+  max-height: 310px;
+}
+
+.gdi-writing-content {
+  padding: 8px 10px 6px;
+  spacing: 14px;
+}
+
+.gdi-writing-heading {
+  font-size: 1.05em;
+  font-weight: 600;
+}
+
+.gdi-writing-section {
+  spacing: 5px;
+}
+
+.gdi-writing-section-title,
+.gdi-writing-error {
+  opacity: 0.7;
+  font-size: 0.84em;
+}
+
+.gdi-writing-text {
+  font-size: 0.92em;
+}
+
+.gdi-writing-controls {
+  padding: 4px 6px 2px;
+  spacing: 6px;
+}
+
+.gdi-writing-button {
+  min-height: 34px;
+  padding: 0 11px;
+  font-size: 0.9em;
+}
+
+/* GNOME supplies all surface, selection, focus and primary-action colors. */
+.gdi-writing-header { spacing: 9px; }
+.gdi-writing-section-title { font-weight: 600; }
+.gdi-writing-button { border-radius: 8px; }
+
+/* Non-modal Phase 3 surface: GNOME supplies all colors and radii. */
+.gdi-passive { padding: 10px; spacing: 8px; }
+.gdi-passive-header { spacing: 7px; font-weight: 600; font-size: .9em; }
+.gdi-passive-text { font-size: .9em; }
+.gdi-passive-controls { spacing: 6px; }
+.gdi-passive-controls .button { padding: 6px 9px; border-radius: 8px; font-size: .82em; }
+
+/* Shared phrase-level writing diff: type weight and strike-through, not color. */
+.gdi-diff-section { spacing: 4px; }
+.gdi-passive-diff { spacing: 4px; }
+.gdi-markdown-heading { font-weight: 700; font-size: 1em; }
+.gdi-markdown-code { padding: 10px; background-color: rgba(127,127,127,0.12); border-radius: 6px; font-size: .85em; }
+.gdi-response-link { padding: 4px 0; font-size: .85em; }
+.gdi-followup { margin: 2px 8px 6px; }
+.gdi-context-note { font-size: .8em; opacity: .7; }
