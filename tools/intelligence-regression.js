@@ -10,6 +10,116 @@ const pause = ms => new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAUL
   resolve(); return GLib.SOURCE_REMOVE;
 }));
 
+/* Phase 4 native actions: rows, immediate execution, confirmation policy,
+ * graceful unavailability, bounded multi-step plans and the model fallback. */
+export async function validateActions(palette, report) {
+  const until = async predicate => {
+    for (let i = 0; i < 140; i++) {
+      if (predicate()) return;
+      await pause(50);
+    }
+    throw new Error(`action check timed out in mode ${palette._mode}`);
+  };
+  const bodyText = () => palette._writingContent.get_children()
+    .map(child => child.text ?? '').join('\n');
+  const reopen = async query => {
+    palette.close(); await pause(180);
+    palette.open();
+    palette._entry.set_text(query);
+  };
+  const appearance = new Gio.Settings({ schema_id: 'org.gnome.desktop.interface' });
+  const originalScheme = appearance.get_string('color-scheme');
+
+  // A read-only action runs immediately and answers with structured text.
+  palette.open();
+  palette._entry.set_text('disk space');
+  await until(() => palette._items[0]?.type === 'action');
+  report('action-row-disk', palette._items[0].plan?.steps?.[0]?.id === 'system.diskUsage');
+  palette._activateItem(0);
+  await until(() => palette._mode === 'action-result');
+  report('disk-info-result', bodyText().includes('free of'));
+
+  await reopen('memory usage');
+  await until(() => palette._items[0]?.type === 'action');
+  palette._activateItem(0);
+  await until(() => palette._mode === 'action-result');
+  report('memory-info-result', bodyText().includes('used of'));
+
+  // Appearance is a direct reversible state change in the disposable profile.
+  const targetScheme = originalScheme === 'prefer-dark' ? 'default' : 'prefer-dark';
+  await reopen(targetScheme === 'prefer-dark' ? 'dark mode' : 'light mode');
+  await until(() => palette._items[0]?.type === 'action');
+  palette._activateItem(0);
+  await until(() => palette._mode === 'action-result');
+  report('color-scheme-action', appearance.get_string('color-scheme') === targetScheme &&
+    bodyText().includes('✓'));
+  appearance.set_string('color-scheme', originalScheme);
+
+  // Audio has no pipewire socket in the nested runtime: it must fail closed
+  // with a readable result, never crash or hang the palette.
+  await reopen('volume 30');
+  await until(() => palette._items[0]?.type === 'action');
+  palette._activateItem(0);
+  await until(() => palette._mode === 'action-result');
+  report('audio-unavailable-graceful', bodyText().includes('✗'));
+
+  // Disabling Wi-Fi always plans a confirmation first and never executes.
+  await reopen('turn wifi off');
+  await until(() => palette._items[0]?.type === 'action');
+  report('wifi-off-plans-confirmation', palette._items[0].plan?.needsConfirmation === true);
+  palette._activateItem(0);
+  report('confirmation-view', palette._mode === 'action-confirm' &&
+    palette._writingControls.get_first_child()?.label === 'Cancel' &&
+    palette._writingContent.get_children().some(child =>
+      (child.text ?? '').includes('may disconnect')));
+  palette._writingControls.get_first_child().emit('clicked', 1);
+  report('confirmation-cancel-closes', !palette._isOpen);
+
+  // Read-only host state through the system bus.
+  await reopen('bluetooth status');
+  await until(() => palette._items[0]?.type === 'action');
+  palette._activateItem(0);
+  await until(() => palette._mode === 'action-result');
+  report('bluetooth-state-readable', bodyText().includes('Bluetooth'));
+
+  await reopen('power profile');
+  await until(() => palette._items[0]?.type === 'action');
+  palette._activateItem(0);
+  await until(() => palette._mode === 'action-result');
+  report('power-profile-readable', bodyText().includes('profile'));
+
+  await reopen('show my ip');
+  await until(() => palette._items[0]?.type === 'action');
+  palette._activateItem(0);
+  await until(() => palette._mode === 'action-result');
+  report('network-status-readable', bodyText().length > 0);
+
+  // Bounded multi-step plans execute in order with one line per step.
+  await reopen('dark mode and disk space');
+  await until(() => palette._items[0]?.type === 'action');
+  report('multi-step-row', palette._items[0].name.includes('+'));
+  palette._activateItem(0);
+  await until(() => palette._mode === 'action-result');
+  report('multi-step-executed', palette._writingContent.get_children()
+    .filter(child => (child.text ?? '').startsWith('✓')).length === 2);
+  appearance.set_string('color-scheme', originalScheme);
+
+  // The routing model may only suggest registry actions; the echo fixture
+  // proves exactly which payload the service returned to the Shell. The
+  // marker must end the line — the mock echoes through the end of it.
+  const mockEndpoint = `http://127.0.0.1:${GLib.getenv('GDI_MOCK_PORT')}`;
+  palette._settings.set_string('model-endpoint', mockEndpoint);
+  await reopen('volume EchoFixture:{"action":"audio.setVolume","args":{"percent":30}}');
+  await until(() => palette._items[0]?.type === 'action' && palette._items[0].suggested === true);
+  report('model-suggested-action-validated',
+    palette._items[0].plan?.steps?.[0]?.id === 'audio.setVolume');
+  await reopen('volume EchoFixture:{"action":"system.runCommand","args":{}}');
+  await until(() => palette._items[0]?.type === 'ask');
+  report('invalid-model-tool-call-falls-back-to-ask', true);
+  palette.close(); await pause(180);
+}
+
+
 export async function validateIntelligence(palette, report) {
   const capture = async name => {
     await pause(160);

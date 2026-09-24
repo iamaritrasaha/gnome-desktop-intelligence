@@ -56,9 +56,11 @@ test-passive: lint
 
 .PHONY: test-refinement
 test-refinement: test-passive
+	node tools/test-actions.mjs
 	node tools/test-presentation.mjs
 	python3 tools/test-writing-refinement.py
 	python3 tools/test-streaming.py
 	python3 tools/test-model-routing.py
+	python3 tools/test-action-service.py
 	python3 tools/test-safety.py
 	python3 tools/test-provider.py

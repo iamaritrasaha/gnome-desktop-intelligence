@@ -116,6 +116,22 @@ class LearningStore:
                     'preferences': self.preferences(db),
                     'preference': 'preserve wording; suppress repeatedly rejected patterns'}
 
+    def action_ranking(self, actions=('app.open', 'directory.open'), limit=20):
+        """Accepted-launch counts per target for ranking only. Labels only —
+        the query text and any file contents never reach this store."""
+        if not os.path.exists(self._path):
+            return {}
+        ranking = {}
+        with self.connect() as db:
+            for action in actions:
+                rows = db.execute(
+                    '''SELECT application,count(*) c FROM signals
+                       WHERE action=? AND signal='accepted'
+                       GROUP BY application ORDER BY c DESC LIMIT ?''',
+                    (action, limit)).fetchall()
+                ranking[action] = {row[0]: row[1] for row in rows}
+        return ranking
+
     def clear(self):
         try:
             for suffix in ('', '-journal', '-wal', '-shm'):

@@ -23,9 +23,9 @@
       <description>Configurable model for short text transformations.</description>
     </key>
     <key name="model-intent-routing" type="s">
-      <default>'ministral-3:3b'</default>
-      <summary>Intent routing model</summary>
-      <description>Configurable model reserved for future structured system and tool actions.</description>
+      <default>'LiquidAI/lfm2.5-1.2b-instruct:q4_k_m'</default>
+      <summary>Action routing model</summary>
+      <description>Small model used only when deterministic parsing cannot map a query to a registered system action.</description>
     </key>
     <key name="model-assistant" type="s">
       <default>'qwen3.5:4b'</default>

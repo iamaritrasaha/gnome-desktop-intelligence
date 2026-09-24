@@ -7,7 +7,7 @@ const BUS_NAME = 'org.gnome.DesktopIntelligence1';
 const OBJECT_PATH = '/org/gnome/DesktopIntelligence1';
 const INTERFACE = 'org.gnome.DesktopIntelligence1';
 
-function call(method, signature, args, timeout, callback) {
+function call(method, signature, args, timeout, callback, flags = Gio.DBusCallFlags.NONE) {
   Gio.bus_get(Gio.BusType.SESSION, null, (_source, result) => {
     let connection;
     try {
@@ -24,7 +24,7 @@ function call(method, signature, args, timeout, callback) {
       method,
       new GLib.Variant(signature, args),
       null,
-      Gio.DBusCallFlags.NONE,
+      flags,
       timeout,
       null,
       (bus, reply) => {
@@ -125,6 +125,39 @@ export function learningStats(callback) {
 }
 
 export function purgeLearningExamples() { call('PurgeLearningExamples', '()', [], 5000, () => {}); }
+
+/* Phase 4 native actions: the routing model lives in the service; diagnostics
+ * and learning signals mirror there with NO_AUTO_START so executing a system
+ * action never activates the intelligence service. */
+export function routeAction(question, registry, timeoutSeconds) {
+  return new Promise((resolve, reject) => {
+    call('RouteAction', '(ss)', [question, registry], (timeoutSeconds + 5) * 1000,
+      (reply, error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(reply);
+      });
+  });
+}
+
+export function recordActionDiagnostic(record) {
+  call('RecordActionDiagnostic', '(s)', [record], 3000, () => {},
+    Gio.DBusCallFlags.NO_AUTO_START);
+}
+
+export function recordActionUse(action, target) {
+  call('RecordActionUse', '(ss)', [action, target], 3000, () => {},
+    Gio.DBusCallFlags.NO_AUTO_START);
+}
+
+export function actionStats(callback) {
+  call('ActionStats', '()', [], 5000, (reply, error) => {
+    if (error) { callback(null, error); return; }
+    try { callback(JSON.parse(reply[0]), null); } catch (e) { callback(null, e); }
+  });
+}
 
 
 // Subscribe before dispatch; every terminal path removes the directed signal listener.

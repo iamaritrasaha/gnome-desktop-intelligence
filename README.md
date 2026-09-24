@@ -19,9 +19,27 @@ gnome-extensions enable gdi@gnome.desktop.intelligence
 
 The default shortcut is `Ctrl+Super+Space`; change it from the panel
 indicator's Settings item. Enter an application name to find and launch it.
-Use `open <name>` or `file <name>` to search files in your home folders, or
-`search <words>` to open a web search in the default browser. Arithmetic such
-as `15 * (2 + 3)` produces a calculator result that Enter copies.
+Use `open <name>`, `find <terms>` or `file <name>` to search files in your home
+folders (`find resume pdf` narrows to PDFs, `find pdfs modified today` to
+recent files), or `search <words>` to open a web search in the default browser.
+Arithmetic such as `15 * (2 + 3)` produces a calculator result that Enter copies.
+
+## Native desktop actions (Phase 4)
+
+Common desktop requests run directly through GNOME APIs, deterministically and
+without a model: `open downloads`, `open display settings`, `volume 30`,
+`mute`, `turn bluetooth off`, `turn wifi on`, `switch to power saver`,
+`turn on dark mode`, `night light off`, `brightness 40`, `show my ip`,
+`how much disk space do I have`, `memory usage`, `battery`, and small
+combinations such as `turn bluetooth off and switch to power saver`. Actions
+that can disrupt something (Wi-Fi off, text-size changes, Bluetooth off with
+connected devices) ask first with a compact confirmation; everything else
+executes immediately and answers with “✓ …” or a short fact. When a query is
+not understood deterministically, a small locally configured routing model may
+propose one registered action (marked “Suggested”); anything else falls back to
+Ask Intelligence. There is no shell command execution at any layer, and no
+file deletion or package management. See `docs/ARCHITECTURE.md` for the full
+registry, backends and safety policy.
 
 If the running Shell has not indexed a newly installed extension directory,
 enable GDI after your next normal login. Development commands do not restart

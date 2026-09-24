@@ -14,11 +14,20 @@ const SEARCH_TIMEOUT_MS = 3000;
 
 let _activeSearch = null;
 
-export function searchFiles(text, callback, limit = 16) {
+/**
+ * Bounded home-directory file search. `options` may narrow results without
+ * widening the scan: `extension` keeps names ending in “.<ext>” and
+ * `modifiedSince` (unix seconds) keeps entries changed after that time. File
+ * contents are never read.
+ */
+export function searchFiles(text, callback, limit = 16, options = {}) {
   cancelFileSearch();
 
   const query = text.trim().toLowerCase();
-  if (query.length < 2) {
+  const extension = typeof options.extension === 'string' && options.extension
+    ? `.${options.extension.toLowerCase()}` : null;
+  const modifiedSince = Number(options.modifiedSince) || 0;
+  if (query.length < 2 && !extension && !modifiedSince) {
     callback([]);
     return;
   }
@@ -32,6 +41,18 @@ export function searchFiles(text, callback, limit = 16) {
   let visitedDirectories = 0;
   let finished = false;
   let timeoutId = 0;
+  const attributes = 'standard::name,standard::icon,standard::type' +
+    (modifiedSince ? ',standard::time-modified' : '');
+
+  const matches = (name, info) => {
+    const lower = name.toLowerCase();
+    if (extension && !lower.endsWith(extension))
+      return false;
+    if (modifiedSince &&
+        info.get_attribute_uint64('standard::time-modified') < modifiedSince)
+      return false;
+    return query.length < 2 || lower.includes(query);
+  };
 
   const finish = (cancelRemaining = false) => {
     if (finished)
@@ -81,7 +102,7 @@ export function searchFiles(text, callback, limit = 16) {
     visitedDirectories++;
     pending++;
     directory.enumerate_children_async(
-      'standard::name,standard::icon,standard::type',
+      attributes,
       Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS,
       GLib.PRIORITY_DEFAULT_IDLE,
       cancellable,
@@ -147,7 +168,7 @@ export function searchFiles(text, callback, limit = 16) {
             continue;
 
           const child = directory.get_child(name);
-          if (name.toLowerCase().includes(query)) {
+          if (matches(name, info)) {
             results.push({
               type: 'file',
               name,

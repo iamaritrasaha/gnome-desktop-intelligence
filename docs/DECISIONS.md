@@ -1,6 +1,73 @@
 # Decisions
 
 
+## 2026-09-25 — Phase 4: native GNOME actions with a closed registry
+
+The user authorized Phase 4 (native GNOME actions), paused all further
+IBus/browser/passive-writing research as deferred-not-abandoned, and required
+the existing Writing/Ask behavior to be preserved.
+
+**Execution lives in the Shell process, by constraint of the audio backend.**
+The only stable native volume interface is GVC — the mixer library GNOME Shell
+itself ships and uses — and it is only introspectable inside the Shell process
+(the typelib lives in gnome-shell's private directory; Python cannot import
+it). Rather than split execution between processes, the whole action engine
+runs in Shell (`src/actions/engine.js`): GVC for audio, GSettings for color
+scheme/Night Light/text scaling, system-bus D-Bus for NetworkManager, BlueZ and
+power-profiles-daemon (with the GNOME 47+ interface name as fallback), the
+session-bus SettingsDaemon Power `Screen.Brightness` property for backlight,
+GIO for apps/folders/links/Settings panels/filesystem facts, `/proc/meminfo`
+and UPower for memory/battery. Every call is asynchronous with a timeout and
+every failure maps to a readable message; a failed action can never crash the
+Shell. No shell commands exist anywhere in the engine; Settings panels use a
+whitelisted `gnome-control-center <panel>` name list verified with
+`gnome-control-center --list` on GNOME 46 (with `appearance` aliased to
+Ubuntu's `ubuntu` panel).
+
+**The registry is the trust boundary.** Pure, node-testable
+`registry.js`/`parser.js` hold ids, typed argument schemas, risk classes and
+phrasing rules. `validateArgs` rejects unknown actions, unknown keys and
+out-of-range values; the parser vetoes invalid values at parse time and all
+information rules are anchored so that multi-step splitting stays unambiguous.
+Launching apps, opening files/folders/links and web search remain purely
+deterministic and are never model-routable.
+
+**Deterministic first, model rarely.** The routing model (the previously
+reserved `model-intent-routing` slot, defaulted to the installed quick model
+because `ministral-3:3b` is not installed) runs only when deterministic
+parsing found nothing and a bounded keyword gate says the query plausibly
+names a desktop capability. The service's new `RouteAction` maps the query to
+at most one registered action via structured output and returns normalized
+JSON; the Shell re-validates it, marks the row "Suggested", and records
+invalid tool calls in diagnostics. No `run_shell` tool exists at any layer.
+
+**Confirmation policy is code, not learning.** READ_ONLY and LOW_RISK execute
+immediately; volume, mute, color scheme, Night Light, brightness and power
+profile are treated as reversible/obvious; Wi-Fi off, text-scaling changes and
+Bluetooth-off-with-connected-devices require a compact confirmation. The
+Bluetooth device check reads BlueZ state (2s cache) — the one conditional
+confirmation this phase. Multi-step plans (max three steps, both halves must
+parse, no recursion) show a plan before execution when any step needs
+confirmation and stop at the first failure.
+
+**Diagnostics and learning mirror to the service with NO_AUTO_START**, so
+executing an action never spawns the intelligence service: bounded RAM-only
+`ActionStats` records source (deterministic/model), action, args, risk,
+latency, result and invalid tool calls; usage learning (existing opt-in only)
+records app/folder labels for within-tier ranking boosts that can never
+outweigh a stronger deterministic match or alter safety. Queries, file
+contents and web-search terms are never stored. `find <terms> <ext>` and
+`modified today` narrow the existing bounded file search; they never widen the
+scan or read contents.
+
+**Validation lesson:** a `RouteAction` fixture with text after the echo marker
+made the mock return unparseable JSON (correct conservative behavior), and a
+test staging without a pinned provider endpoint silently reached the host's
+real Ollama. Fixtures now put the echo marker at end-of-line and pin
+`model-endpoint` to the loopback mock inside a private bus/HOME
+(`tools/test-action-service.py`).
+
+
 ## 2026-09-24 — architecture correction: Ask commands, capability model, gate algebra
 
 The Phase 3.5 handoff was physically broken in three places, fixed at the

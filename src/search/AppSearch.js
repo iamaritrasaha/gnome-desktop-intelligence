@@ -50,7 +50,7 @@ function _ensureAppCache() {
   _buildAppCache();
 }
 
-export function searchApps(text, limit = 8) {
+export function searchApps(text, limit = 8, boosts = {}) {
   _ensureAppCache();
   const query = text.trim().toLowerCase();
   if (!query)
@@ -70,8 +70,12 @@ export function searchApps(text, limit = 8) {
     else if (query.length >= 2)
       score = fuzzyMatchScore(query, app.searchName);
 
-    if (score >= 0)
-      matches.push({ app, score });
+    if (score < 0)
+      continue;
+    // Opt-in usage learning may reorder within a score tier but can never
+    // outrank a stronger deterministic match class.
+    const learned = Math.min(Number(boosts[app.id] ?? 0), 8) * 60;
+    matches.push({ app, score: score + learned });
   }
 
   matches.sort((a, b) => b.score - a.score ||

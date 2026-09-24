@@ -1,8 +1,112 @@
 # Current state
 
-Updated: 2026-09-24 (architecture-correction pass)
+Updated: 2026-09-25 (Phase 4 — native GNOME actions)
 
-## Architecture correction — Ask semantics, capability model, gate algebra
+## Phase 4 — native GNOME actions implemented and validated
+
+Phase 4 was explicitly authorized with the constraints: no unrestricted shell
+execution, native APIs only, deterministic-first routing, and the existing
+Writing/Ask/Passive behavior preserved. IBus/browser/system-wide writing
+research is paused and recorded as **deferred, not abandoned** (see the
+Firefox capability matrix below — it remains an accurate measured statement).
+
+### What is implemented
+
+- **Registry** (`src/actions/registry.js`, pure and node-testable): stable
+  action ids, typed argument schemas, risk classes (READ_ONLY / LOW_RISK /
+  STATE_CHANGE; SENSITIVE and DESTRUCTIVE exist in the policy with no Phase 4
+  actions), availability backend tags, confirmation labels/notes.
+  `validateArgs` is the trust boundary for every caller, including models.
+- **Execution engine** (`src/actions/engine.js`, Shell process, fully async):
+  GVC (GNOME Shell's own mixer library) for volume/mute; GSettings for color
+  scheme, Night Light, text scaling; NetworkManager D-Bus for Wi-Fi and
+  network/IP status; BlueZ D-Bus for Bluetooth state and power; the session
+  SettingsDaemon `Screen.Brightness` property for backlight; power-profiles-
+  daemon D-Bus (`net.hadess.PowerProfiles`, GNOME 47+ name as fallback);
+  GIO for app/folder/link launch, whitelisted Settings panels and filesystem
+  stats; `/proc/meminfo` and UPower DisplayDevice for memory/battery. No shell
+  commands anywhere. Every failure is a readable result, never a Shell crash.
+- **Deterministic parser** (`src/actions/parser.js`): anchored, inspectable
+  rule table covering the phase's example phrasings plus common variants
+  (`volume 30`, `mute`, `turn/switch/enable/disable bluetooth|wifi`,
+  `switch to power saver`, `turn on dark mode`, `open display settings`,
+  `open downloads`, `show my ip`, `how much disk space do i have`,
+  `text scaling 1.25`, `find resume pdf`, `find pdfs modified today`, URLs).
+  Bounded multi-step plans (`and`/`then`, ≤3 steps, all parts must parse).
+- **Palette UI**: action rows (type "Action", model rows "Suggested"),
+  compact confirmation view (Cancel / Turn Off with an explanatory note),
+  "✓ …" result views with per-step lines for plans, Copy for info answers,
+  concise unavailable/error messages. Launcher precedence and all existing
+  modes are unchanged.
+- **Service** (`gdi-service.py`): `RouteAction(question, registry)` runs the
+  configured small routing model with structured output and normalization
+  (`normalize_intent_response`), bounded question/registry sizes and a
+  concurrency cap; `RecordActionDiagnostic`/`RecordActionUse`/`ActionStats`
+  provide bounded RAM-only diagnostics and ranking data (NO_AUTO_START, so
+  actions never spawn the service). `model-intent-routing` now defaults to the
+  installed quick model (`ministral-3:3b` was never installed).
+- **Learning (ranking only, existing opt-in)**: accepted app/folder actions
+  store labels only; `ActionStats` returns per-app/per-folder counts used to
+  reorder candidates within a search tier — never across match classes and
+  never the confirmation policy. Queries, file contents and web-search terms
+  are never stored.
+- **File search**: `find <terms>` phrasing with trailing-type narrowing
+  (`find resume pdf`), plural forms (`pdfs`) and `modified today` mtime filter;
+  the scan bounds (depth, directory count, timeout) are unchanged and file
+  contents are never read.
+
+### Safety envelope (unchanged by personalization or models)
+
+Immediate: read-only queries, app/folder/link launch, web search, volume,
+mute, color scheme, Night Light, brightness, power profile. Compact
+confirmation: Wi-Fi off ("may disconnect your network"), text-scaling changes,
+and Bluetooth off when connected devices would be affected. Excluded from this
+phase: file deletion, package management, process killing, arbitrary shell
+execution, browser automation, email/calendar, autonomous agents, model
+self-modification.
+
+### Validation performed (2026-09-25)
+
+| Check | Result |
+| --- | --- |
+| `make lint test-refinement pack` | PASS (schemas, JS/Python syntax, packaging regressions; 40 suite results, no failures) |
+| `tools/test-actions.mjs` (new) | PASS — 100+ parse cases incl. every phase example, non-action guards (`open firefox`, `rm -rf /`, `install firefox`), argument validation, confirmation policy, model-routable surface |
+| `tools/test-action-service.py` (new) | PASS — real service on a private bus with pinned mock provider: RouteAction passthrough (echo-verified), garbage normalization, oversized question/registry rejection, diagnostics bounded to 50 with newest kept, learning off/on ranking behavior |
+| `tools/test-model-routing.py` | PASS — new intent-mapping payload assertions (bounded structured output, registry in prompt, no execution rights) + response normalization |
+| `tools/validate-nested-wayland.sh` | PASS — 100 GDI_TEST probes true, zero failures, incl. new action probes: disk/memory info results, color-scheme change+restore in the disposable profile, graceful audio unavailability (no pipewire socket in the nested runtime), Wi-Fi-off confirmation view without execution, Bluetooth/power-profile/network read-only state over the host system bus, two-step plan execution, echo-verified model suggestion and invalid-tool-call Ask fallback |
+| Regression | All prior probes still PASS: launcher, Ask (bare/prefix/echo payload), streaming/Markdown/follow-ups, explicit writing Replace/Undo/Insert, stale refusal, capability reports, passive lifecycle, provider failure, disable/re-enable |
+| Live host APIs (read-only) | Verified directly: power profile (`net.hadess.PowerProfiles` active), NM `WirelessEnabled`, BlueZ adapter `Powered` + device inventory, gsd `Brightness` (reported −1: no backlight on this desktop — brightness actions correctly report unavailable), `color-scheme`, `night-light-enabled`, `gnome-control-center --list` panel set |
+| Host settings changed | None by validation (reads only). Nested-session dark-mode toggles stayed inside the disposable dconf profile and were restored |
+| Live session | Not restarted; no logout; nothing installed into the active desktop |
+
+Evidence: `build/validation/shell.log`, `session.log`, `atspi.log`,
+`nested-phase4.log` (and the first attempt with the pre-fix failures),
+`nested-phase4-first-attempt.log`, `phase35-*` screenshots and logs.
+
+### What is intentionally not implemented
+
+- Deletion/moving/renaming files, package installation, process killing.
+- Any model-facing execution surface beyond the validated single-action map.
+- Brightness is available only where a backlight exists (this desktop has
+  none; the action reports that cleanly rather than pretending).
+- Writing-input compatibility research (Gecko replacement, GTK4 single-line
+  capture, IBus paths) is **deferred, not abandoned**; the measured capability
+  matrix and privacy fail-closed decisions stand unchanged.
+
+### Exact next task
+
+Physical everyday testing of Phase 4 after the next normal login (the active
+session still runs the previously installed build; GNOME 46 caches extension
+modules — do not restart the session). Install with `make lint install`.
+Verify in real use: `volume 30` / `mute` (audible path), `turn bluetooth off`
+with a connected device (confirmation appears; devices survive cancel),
+`turn wifi off` confirmation + cancel, `open downloads`, `open display
+settings`, `show my ip`, `disk space`, a two-step request, and that Ask/Writing
+still behave. Report any silent failure. Stop at this Phase 4 boundary.
+
+---
+
+## Architecture correction — Ask semantics, capability model, gate algebra (historical, 2026-09-24)
 
 This pass fixed the remaining architectural defects from the Phase 3.5
 handoff. Native GNOME direction, 500px palette, stable top edge, Intelligence

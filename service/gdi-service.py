@@ -15,7 +15,7 @@ import gi
 gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi, Gio, GLib
 
-from router import ModelRouter
+from router import ModelRouter, normalize_intent_response
 from selection import SelectionContext
 from learning import LearningStore
 from passive import PassiveWriting
@@ -96,6 +96,14 @@ INTROSPECTION_XML = """
     <method name="UndoPassive"><arg type="s" direction="in"/><arg type="b" direction="out"/><arg type="s" direction="out"/></method>
     <method name="LearningStats"><arg type="s" direction="out"/></method>
     <method name="PassiveStats"><arg type="s" direction="out"/></method>
+    <method name="ActionStats"><arg type="s" direction="out"/></method>
+    <method name="RecordActionDiagnostic"><arg type="s" direction="in"/></method>
+    <method name="RecordActionUse"><arg type="s" direction="in"/><arg type="s" direction="in"/></method>
+    <method name="RouteAction">
+      <arg type="s" name="question" direction="in"/>
+      <arg type="s" name="registry" direction="in"/>
+      <arg type="s" name="response" direction="out"/>
+    </method>
     <method name="ClearLearning">
       <arg type="b" name="success" direction="out"/>
     </method>
@@ -129,6 +137,8 @@ class GdiService(SelectionContext):
         self._passive = PassiveWriting(self, self._settings, self._emit_passive)
         self._contexts = {}
         self._requests = {}
+        self._action_stats = []
+        self._route_actions = 0
         self._owner_signal = connection.signal_subscribe(
             "org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged",
             "/org/freedesktop/DBus", None, Gio.DBusSignalFlags.NONE,
@@ -231,9 +241,81 @@ class GdiService(SelectionContext):
                         GLib.timeout_add(75, passive_edit)
                     else:
                         passive_edit()
-            elif method in ('LearningStats', 'PassiveStats'):
-                stats = self._learning.stats() if method == 'LearningStats' else self._passive.stats()
+            elif method in ('LearningStats', 'PassiveStats', 'ActionStats'):
+                if method == 'LearningStats':
+                    stats = self._learning.stats()
+                elif method == 'PassiveStats':
+                    stats = self._passive.stats()
+                else:
+                    stats = {'recent': self._action_stats}
+                    if self._settings.get_boolean('enable-learning'):
+                        try:
+                            ranking = self._learning.action_ranking()
+                            stats['apps'] = ranking.get('app.open', {})
+                            stats['dirs'] = ranking.get('directory.open', {})
+                        except Exception:
+                            stats['apps'] = {}
+                            stats['dirs'] = {}
+                    else:
+                        stats['apps'] = {}
+                        stats['dirs'] = {}
                 invocation.return_value(GLib.Variant('(s)', (json.dumps(stats),)))
+            elif method == 'RecordActionDiagnostic':
+                try:
+                    record = json.loads(args[0])
+                    if not isinstance(record, dict):
+                        raise ValueError('not an object')
+                    if len(json.dumps(record)) > 4096:
+                        record = {'status': 'oversized-record'}
+                except Exception:
+                    record = {'status': 'unparsed-record'}
+                self._action_stats.append(record)
+                self._action_stats[:] = self._action_stats[-50:]
+                invocation.return_value(GLib.Variant('()', ()))
+            elif method == 'RecordActionUse':
+                if self._settings.get_boolean('enable-learning'):
+                    try:
+                        self._learning.record(args[0][:64], 'accepted', args[1][:128])
+                    except Exception as error:
+                        print(f"GDI learning store unavailable: {error}", flush=True)
+                invocation.return_value(GLib.Variant('()', ()))
+            elif method == 'RouteAction':
+                question, registry_json = args
+                if not question.strip() or len(question) > 200:
+                    raise ProviderError("The request is outside GDI's routing limits.")
+                if len(registry_json) > 16384:
+                    raise ProviderError("The action registry exceeded GDI's limit.")
+                registry = json.loads(registry_json)
+                if not isinstance(registry, list):
+                    raise ProviderError('Invalid action registry.')
+                if self._route_actions >= 2:
+                    raise ProviderError('GDI is busy. Try again shortly.')
+                self._route_actions += 1
+
+                def routed(response, error):
+                    self._route_actions = max(0, self._route_actions - 1)
+                    try:
+                        if error is not None:
+                            invocation.return_dbus_error(
+                                f'{INTERFACE}.Error.Provider',
+                                'The routing model could not answer.')
+                            return
+                        invocation.return_value(GLib.Variant(
+                            '(s)', (json.dumps(normalize_intent_response(response)),)))
+                    except Exception:
+                        pass  # The client disappeared; nothing to answer.
+
+                try:
+                    self._router.run_intent_mapping(
+                        question=question, registry=registry_json,
+                        provider_name=self._settings.get_string('model-provider'),
+                        endpoint=self._settings.get_string('model-endpoint'),
+                        model=self._settings.get_string('model-intent-routing'),
+                        cancellable=Gio.Cancellable(), callback=routed,
+                        timeout=min(20, self._settings.get_int('request-timeout')))
+                except Exception as error:
+                    self._route_actions = max(0, self._route_actions - 1)
+                    raise
             elif method == "GetFocusedContext":
                 self._passive.dismiss('explicit')
                 context = self._capture_focused_context(args[0])

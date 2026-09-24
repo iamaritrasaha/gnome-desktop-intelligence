@@ -7,7 +7,8 @@ from pathlib import Path
 from gi.repository import Gio
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'service'))
-from router import ModelRouter
+from providers.base import ProviderError
+from router import ModelRouter, normalize_intent_response
 from providers.ollama import OllamaProvider
 
 source = Gio.SettingsSchemaSource.new_from_directory(
@@ -20,7 +21,8 @@ models = {name: default('model-' + key) for name, key in [
     ('quick', 'quick-writing'), ('intent', 'intent-routing'),
     ('assistant', 'assistant'), ('reasoning', 'reasoning')]}
 assert models == {'quick': 'LiquidAI/lfm2.5-1.2b-instruct:q4_k_m',
-                  'intent': 'ministral-3:3b', 'assistant': 'qwen3.5:4b',
+                  'intent': 'LiquidAI/lfm2.5-1.2b-instruct:q4_k_m',
+                  'assistant': 'qwen3.5:4b',
                   'reasoning': 'qwen3.5:4b'}
 
 class Recorder:
@@ -52,4 +54,33 @@ for ttl in (0, 30):
         assert payload['keep_alive'] == ttl
         assert payload['model'] == models['quick']
         assert payload['stream'] is False
-print('Model defaults, writing routes, and per-request keep_alive: PASS (no models loaded)')
+
+# Phase 4: the action-routing route is a bounded structured-output request that
+# can only ever name a registry action; it carries no execution rights.
+router.run_intent_mapping(
+    question='make it darker in here', registry='[{"id": "gnome.setColorScheme"}]',
+    provider_name='ollama', endpoint='http://localhost:11434',
+    model=models['intent'], cancellable=None, callback=lambda *_: None)
+assert recorder.request['model'] == models['intent']
+assert recorder.request['keep_alive'] == 0
+assert recorder.request['response_schema']['required'] == ['action']
+assert recorder.request['output_tokens'] == 256
+assert 'Never invent actions' in recorder.request['system']
+assert recorder.request['prompt'].startswith('Request: make it darker in here')
+assert '"id": "gnome.setColorScheme"' in recorder.request['prompt']
+try:
+    router.run_intent_mapping(question='x', registry='[]', provider_name='ollama',
+                              endpoint='', model='   ', cancellable=None,
+                              callback=lambda *_: None)
+    raise SystemExit('an empty routing model must be refused')
+except ProviderError as error:
+    assert 'routing model' in str(error)
+
+assert normalize_intent_response('{"action": "audio.setVolume", "args": {"percent": 30}}') == \
+    {'action': 'audio.setVolume', 'args': {'percent': 30}}
+assert normalize_intent_response('not json at all') == {'action': '', 'args': {}}
+assert normalize_intent_response('{"action": null}') == {'action': '', 'args': {}}
+assert normalize_intent_response('{"action": "x", "args": [1]}') == {'action': 'x', 'args': {}}
+assert normalize_intent_response('{"action": 5}') == {'action': '', 'args': {}}
+
+print('Model defaults, writing routes, keep_alive and action routing: PASS (no models loaded)')

@@ -320,6 +320,106 @@ cancellation, latency and listener/timer counters. Neither API polls or runs
 model work. Diagnostics are not displayed as normal response chrome. See
 CURRENT_STATE for actual measured timings and remaining physical tests.
 
+## Phase 4: native action registry, routing and execution
+
+```text
+GNOME Shell (GJS)                          Session service (Python/PyGObject)
+  palette: action rows, confirm/          RouteAction(question, registry) -> JSON
+  result views; learning/ranking            small routing model, structured output,
+  src/actions/registry.js (pure data)       RecordActionDiagnostic, RecordActionUse,
+  src/actions/parser.js (pure rules)        ActionStats (RAM-only, bounded)
+  src/actions/engine.js (execution)
+```
+
+### Registry and trust boundary
+
+`src/actions/registry.js` is pure data (importable by node): every action has a
+stable id (`audio.setVolume`, `bluetooth.setState`, `system.diskUsage`, …), a
+risk class (READ_ONLY, LOW_RISK, STATE_CHANGE; SENSITIVE/DESTRUCTIVE exist in
+the policy but no Phase 4 action uses them), a backend tag, typed argument
+schemas (`percent`, `factor`, `onoff`, `profile`, `scheme`, `panel`, `dirname`,
+`url`, `text`, `app`), row/confirmation strings, and an availability backend.
+`validateArgs` is the trust boundary: unknown ids, unknown keys and
+out-of-type/out-of-range values are rejected, so neither the parser nor the
+routing model can construct an unregistered or mistyped call.
+
+Backends are native only: GVC (the mixer library GNOME Shell itself uses) for
+volume/mute; GSettings for color scheme, Night Light and text scaling;
+NetworkManager D-Bus for Wi-Fi and network state; BlueZ D-Bus (adapter
+`Powered`, device `Connected`) for Bluetooth; power-profiles-daemon D-Bus
+(`net.hadess.PowerProfiles`, with the GNOME 47+ `org.freedesktop.UPower.PowerProfiles`
+name as fallback) for power profiles; the session-bus SettingsDaemon Power
+`Screen.Brightness` property for backlight; GIO for apps, folders, links,
+Settings panels (whitelisted `gnome-control-center <panel>` names only) and
+filesystem statistics; `/proc/meminfo` and UPower DisplayDevice for memory and
+battery facts. There are no shell commands anywhere in the engine.
+
+### Deterministic routing
+
+`src/actions/parser.js` is a bounded, inspectable rule table (checked by
+`tools/test-actions.mjs`) that normalizes phrasings — `volume 30`,
+`turn bluetooth off`, `switch off bluetooth`, `disable wifi`, `use power
+saver`, `turn on dark mode`, `open display settings`, `open downloads`,
+`show my ip`, `find resume pdf`, `find pdfs modified today` — onto registry
+actions. Launcher precedence stays: `search` prefix (web), calculator, `ask`
+prefix, then actions, then apps/files, then Ask Intelligence. Multi-step
+queries split on `and`/`then`; every part must parse, at most three steps, no
+recursion. `find <terms> <ext>` and a trailing `modified today` narrow the
+existing bounded file search (extension and mtime filters in FileSearch.js,
+never a wider scan and never file contents).
+
+### Execution, confirmation and results
+
+`src/actions/engine.js` runs inside the Shell process but is fully
+asynchronous: D-Bus property/method calls with timeouts, a lazily opened GVC
+control, and GSettings writes. `preparePlan(query)` re-validates parsed steps
+and attaches confirmation decisions; the confirmation policy is a pure
+registry function plus machine facts — immediate for READ_ONLY, launches,
+volume/mute, color scheme, Night Light, brightness and power profile; explicit
+compact confirmation for Wi-Fi off, text-scaling changes, and Bluetooth off
+only when connected devices would be affected. Personalization never
+participates in this decision. Results render in the palette's native surface:
+“✓ …” for executed changes, the structured answer for info actions (Copy
+available), per-step ✓/✗ lines for plans (stopping at the first failure), and a
+concise unavailable/service-down message otherwise. A failing action can never
+crash the Shell: every backend error is mapped to a readable message.
+
+### Model fallback and diagnostics
+
+Only when deterministic parsing finds nothing and the query plausibly names a
+desktop capability (bounded keyword gate) does the palette call the service's
+`RouteAction(question, registry)`. The service runs the configured small
+routing model (`model-intent-routing`) with a structured-output schema and a
+compact registry description, returns normalized JSON (`normalize_intent_response`),
+and imposes a 200-character question cap, a 16 KiB registry cap and a
+concurrency limit of 2. The Shell re-validates the reply against the registry
+(`prepareAction`); unknown actions or invalid arguments are recorded as invalid
+tool calls and fall back to the Ask Intelligence row. Suggested rows are
+marked “Suggested”; launch/file/web/url actions are never model-routable.
+
+Learning is ranking-only and gated by the existing opt-in `enable-learning`
+setting: accepted app/folder actions record labels (`app.open`, target) into
+the existing bounded signals table; `ActionStats` returns per-app and
+per-folder counts that can reorder candidates within a search-score tier (an
+exact match always outranks a boosted weaker match). Queries, file contents and
+web-search terms are never stored.
+
+Diagnostics mirror bounded records (source, action, args, risk, latency,
+status, reason) to the service's RAM-only `ActionStats` via `NO_AUTO_START`
+calls, so executing an action never spawns the intelligence service; records
+cover deterministic vs model routing, execution latency, failure reasons and
+invalid model tool calls, and never appear in normal UI.
+
+### Regression coverage
+
+`tools/test-actions.mjs` (node) asserts the rule table, argument validation,
+confirmation policy and model-routable surface. `tools/test-model-routing.py`
+covers the routing-model payload and response normalization. Nested GNOME 46
+probes (`validateActions` in `tools/intelligence-regression.js`) exercise rows,
+immediate execution, the confirmation view without execution, graceful audio
+unavailability, read-only system-bus state, a two-step plan, and the
+echo-fixture-verified model fallback with an invalid-tool-call fallback.
+
 ## Phase 3: passive writing boundary
 
 `PassiveController.js` is separate from the launcher. It owns only the small

@@ -12,11 +12,12 @@ without an AI backend, and careful with user data.
 - Deterministic actions such as app launch, file opening, and web search take
   precedence over model calls.
 - Model access is optional and provider-neutral. Ollama is the first provider.
+- Model output never executes commands: the Phase 4 native action registry is
+  the only execution surface, model-proposed actions are re-validated against
+  it before use, and arbitrary shell access remains excluded.
 - Focused writing assistance is explicit. Passive suggestions must be subtle,
   contextual, reversible, and never silently rewrite substantial text.
 - Local learning is inspectable and can be disabled or cleared. No telemetry.
-- Model output never executes commands. Any future system-action registry
-  requires separate authorization; arbitrary shell access remains excluded.
 
 ## Visual identity
 
@@ -141,8 +142,55 @@ accepted brevity/detail or casual-tone choices influence Improve writing only;
 explicit tone choices take precedence. Preferences expose the learned direction,
 counts and Clear. There is no weight training or autonomous prompt modification.
 
+## Phase 4 — native GNOME actions
+
+GDI understands common desktop requests and performs them through GNOME/Linux
+native APIs. Most actions are parsed deterministically and execute instantly
+without any model. There is no generic shell tool: every action is a registered
+capability with a stable id, typed arguments, a risk class, an availability
+backend and a validation rule, and model output can only ever name a registered
+action (which is then re-validated) — never an arbitrary command.
+
+Supported actions and examples (full registry in ARCHITECTURE.md):
+
+- Launch and open: `open firefox` (app search), `open downloads`
+  (Downloads folder), `open display settings` (the GNOME Settings panel),
+  `open https://…` (web link), `find resume pdf` / `find pdfs modified today`
+  (bounded file search).
+- Audio: `volume 30`, `make the volume 40`, `mute`, `unmute`, `volume up`.
+- Bluetooth: `turn bluetooth off` (compact confirmation when devices are
+  connected), `bluetooth status`.
+- Wi-Fi/network: `turn wifi on`, `turn wifi off` (confirm), `show my ip`,
+  `network status`.
+- Power: `switch to power saver`, `performance mode`, `power profile`,
+  `battery`.
+- Appearance: `turn on dark mode`, `light mode`, `night light off`,
+  `text scaling 1.25` (always confirmed), `color scheme`.
+- Brightness: `brightness 40`, `brighter` where a backlight exists.
+- System information: `how much disk space do I have`, `memory usage`.
+
+Results are shown as compact native rows and views — “✓ Bluetooth turned off”,
+a disk/mem/IP answer, or a concise unavailable/error message. Small bounded
+multi-step requests such as `turn bluetooth off and switch to power saver`
+execute as an ordered plan (at most three steps, no recursion); if any step
+needs confirmation, the whole plan is shown before execution. When
+deterministic parsing finds nothing and the query plausibly names a desktop
+capability, a small configurable routing model may propose one registered
+action (marked “Suggested”); invalid proposals fall back to Ask Intelligence.
+Personalization can reorder frequently used apps and folders only; it can never
+change the confirmation policy. Deleting files, installing packages, killing
+processes and arbitrary shell execution are excluded from this phase.
+
+Developer diagnostics (never shown in normal UI) record parsed intent,
+deterministic vs model routing, chosen action, arguments, risk class, latency,
+result and invalid model tool calls; they are inspectable via the service's
+`ActionStats`.
+
 ## Later phases
 
-Broader system actions, autocomplete prediction and model-weight training remain
-out of scope. Stop at Phase 3.5 physical everyday testing; no system-agent work is
-authorized by this implementation.
+Broader system actions beyond the Phase 4 registry, autocomplete prediction and
+model-weight training remain out of scope. Writing-input compatibility research
+for Firefox/Gecko fields and IME paths is **deferred, not abandoned**: the
+measured capability matrix stands (webpage selections supported read-only,
+Gecko replacement and passive offers disabled) and no further passive-writing
+research is scheduled while Phase 4 work continues.

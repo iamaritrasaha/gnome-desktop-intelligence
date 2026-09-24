@@ -19,19 +19,29 @@ import { calculateExpression } from './src/search/Calculator.js';
 import { searchApps } from './src/search/AppSearch.js';
 import { cancelFileSearch, searchFiles } from './src/search/FileSearch.js';
 import {
+  actionStats,
   cancelTransform,
   captureFocusedContext,
   errorMessage,
   releaseContext,
   recordSignal,
+  recordActionUse,
   replaceSelection,
   transform,
   streamTransform,
   undoReplacement,
 } from './src/intelligence/ServiceClient.js';
 
-import {askQueryRemainder, isResponse, preferAssistant, selectionIntent, selectionIntentParts} from './src/intelligence/Presentation.js';
-import {addDiff, addMarkdown} from './src/intelligence/ResponseView.js';
+import { askQueryRemainder, isResponse, preferAssistant, selectionIntent, selectionIntentParts } from './src/intelligence/Presentation.js';
+import { addDiff, addMarkdown } from './src/intelligence/ResponseView.js';
+import { parseActionPlan, parseFileQuery } from './src/actions/parser.js';
+import {
+  executePlan,
+  mayNeedModelRouting,
+  prepareAction,
+  preparePlan,
+  suggestActionFromModel,
+} from './src/actions/engine.js';
 
 const PALETTE_WIDTH = 500;
 const RESULT_LIMIT = 4;
@@ -238,6 +248,7 @@ export class LauncherPalette {
     this._animationGeneration++;
     this._palette.remove_all_transitions();
     this._resetWritingState();
+    this._refreshActionRanking();
     this._entry.set_text('');
     this._clearResults();
     this._writingContext = context;
@@ -606,21 +617,52 @@ export class LauncherPalette {
     // submits only the question. Exact app names still win natural questions.
     const askRemainder = askQueryRemainder(query);
     if (askRemainder !== null) {
-      this._setResults([{
-        type: 'ask', name: _('Ask Intelligence'),
-        query: askRemainder,
-        promptOnly: askRemainder === '',
-        icon: this._intelligenceIcon,
-      }]);
+      this._setResults([this._askRow(askRemainder)]);
       return;
     }
 
+    // Native desktop actions: deterministic parsing first; the routing model
+    // is only consulted (below) when nothing here matches.
+    if (parseActionPlan(query)) {
+      preparePlan(query).then(plan => {
+        if (!this._isOpen || generation !== this._queryGeneration)
+          return;
+        if (plan) {
+          this._setResults([{
+            type: 'action',
+            name: this._actionPlanName(plan),
+            plan,
+            icon: this._actionIcon(plan.steps[0].action.icon),
+          }]);
+          return;
+        }
+        // Validation vetoed the plan (e.g. an untrusted URL form): fall back
+        // to the plain launcher interpretation instead of showing nothing.
+        this._searchLauncher(query, generation);
+      }).catch(() => {
+        if (this._isOpen && generation === this._queryGeneration)
+          this._searchLauncher(query, generation);
+      });
+      return;
+    }
+    this._searchLauncher(query, generation);
+  }
+
+  _searchLauncher(query, generation) {
     let term = query;
     let shouldSearchFiles = false;
-    const fileQuery = query.match(/^(?:file|find file)\s+(.+)$/i) ??
-      query.match(/^\.\s*(.+)$/);
+    let fileOptions = null;
+    const parsedFile = parseFileQuery(query);
+    const fileQuery = query.match(/^\.\s*(.+)$/);
     const openQuery = query.match(/^open\s+(.+)$/i);
-    if (fileQuery) {
+    if (parsedFile) {
+      term = parsedFile.terms;
+      shouldSearchFiles = true;
+      fileOptions = {
+        extension: parsedFile.extension,
+        modifiedSince: parsedFile.modifiedToday ? this._localMidnight() : 0,
+      };
+    } else if (fileQuery) {
       term = fileQuery[1].trim();
       shouldSearchFiles = true;
     } else if (openQuery) {
@@ -628,31 +670,216 @@ export class LauncherPalette {
       shouldSearchFiles = true;
     }
 
-    const apps = searchApps(term, RESULT_LIMIT);
+    const apps = searchApps(term, RESULT_LIMIT, this._actionRanking?.apps ?? {});
     if (!shouldSearchFiles) {
       if (apps.length && !preferAssistant(query, apps.map(app => app.name))) {
         this._setResults(apps);
         return;
       }
-      // Natural questions route to Ask verbatim when no app claim is stronger.
-      this._setResults([{
-        type: 'ask', name: _('Ask Intelligence'),
-        query,
-        icon: this._intelligenceIcon,
-      }]);
+      // Deterministic parsing found nothing: the small routing model may map
+      // the query to one registered action when it plausibly names a desktop
+      // capability. Anything else goes to Ask Intelligence verbatim.
+      if (!preferAssistant(query, []) && mayNeedModelRouting(query)) {
+        this._startActionSuggestion(query, generation);
+        return;
+      }
+      this._setResults([this._askRow(query)]);
       return;
     }
 
     this._setResults(apps);
-    if (term.length < 2)
+    if (term.length < 2 && !fileOptions?.extension && !fileOptions?.modifiedSince)
       return;
 
     searchFiles(term, files => {
       if (!this._isOpen || generation !== this._queryGeneration)
         return;
-      this._setResults([...apps, ...files].slice(0, RESULT_LIMIT));
-    }, RESULT_LIMIT);
+      this._setResults([...apps, ...this._rankFiles(files)].slice(0, RESULT_LIMIT));
+    }, RESULT_LIMIT, fileOptions ?? {});
   }
+
+  _askRow(query) {
+    return {
+      type: 'ask', name: _('Ask Intelligence'),
+      query,
+      promptOnly: query === '',
+      icon: this._intelligenceIcon,
+    };
+  }
+
+  _actionPlanName(plan) {
+    return plan.steps.map(step => step.action.title(step.args)).join(' + ');
+  }
+
+  _actionIcon(name) {
+    try {
+      return new Gio.ThemedIcon({ name });
+    } catch (_error) {
+      return this._intelligenceIcon;
+    }
+  }
+
+  _localMidnight() {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000;
+  }
+
+  _rankFiles(files) {
+    const boosts = this._actionRanking?.dirs ?? {};
+    if (!Object.keys(boosts).length)
+      return files;
+    return [...files].sort((a, b) =>
+      (boosts[b.name] ?? 0) - (boosts[a.name] ?? 0));
+  }
+
+  _refreshActionRanking() {
+    if (!this._learningEnabled()) {
+      this._actionRanking = null;
+      return;
+    }
+    actionStats((stats, _error) => {
+      if (stats)
+        this._actionRanking = stats;
+    });
+  }
+
+  _startActionSuggestion(query, generation) {
+    // Bounded model use: one routing-model request per query, guarded by the
+    // search generation. Deterministic actions never enter this path.
+    this._setResults([{
+      type: 'action-searching',
+      name: _('Looking for a matching action…'),
+      icon: this._intelligenceIcon,
+    }]);
+    suggestActionFromModel(query, this._settings).then(suggested => {
+      if (!this._isOpen || generation !== this._queryGeneration)
+        return;
+      if (!suggested) {
+        this._setResults([this._askRow(query)]);
+        return;
+      }
+      prepareAction(suggested.id, suggested.args).then(plan => {
+        if (!this._isOpen || generation !== this._queryGeneration)
+          return;
+        if (!plan) {
+          this._setResults([this._askRow(query)]);
+          return;
+        }
+        this._setResults([{
+          type: 'action',
+          name: this._actionPlanName(plan),
+          plan,
+          suggested: true,
+          icon: this._actionIcon(plan.steps[0].action.icon),
+        }]);
+      }).catch(() => {
+        if (this._isOpen && generation === this._queryGeneration)
+          this._setResults([this._askRow(query)]);
+      });
+    }).catch(() => {
+      if (this._isOpen && generation === this._queryGeneration)
+        this._setResults([this._askRow(query)]);
+    });
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Native action views: confirmation, execution and result.          */
+  /* ---------------------------------------------------------------- */
+
+  _showActionView({heading, lines, buttons}) {
+    this._searchRow.hide();
+    this._clearResults();
+    this._palette.add_style_class_name('gdi-ai-mode');
+    this._writingContent.destroy_all_children();
+    this._writingControls.destroy_all_children();
+    this._writingScroll.show();
+    this._writingView.show();
+    this._followup.hide();
+    if (heading)
+      this._addWritingHeading(heading);
+    for (const line of lines) {
+      const label = new St.Label({
+        style_class: 'gdi-writing-text',
+        text: line,
+        x_expand: true,
+      });
+      label.clutter_text.line_wrap = true;
+      label.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+      label.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+      this._writingContent.add_child(label);
+    }
+    for (const [label, callback, flat] of buttons)
+      this._addWritingButton(label, callback, flat);
+    this._positionPalette();
+    const firstButton = this._writingControls.get_first_child();
+    if (firstButton)
+      global.stage.set_key_focus(firstButton);
+  }
+
+  _runActionPlan(plan) {
+    if (plan.needsConfirmation) {
+      this._pendingPlan = plan;
+      const heading = `${this._actionPlanName(plan)}?`;
+      const lines = [];
+      if (plan.steps.length > 1) {
+        plan.steps.forEach((step, index) => {
+          lines.push(`${index + 1}. ${step.action.title(step.args)}`);
+        });
+      }
+      for (const step of plan.steps) {
+        const note = step.action.confirmNote?.(step.args);
+        if (note && !lines.includes(note))
+          lines.push(note);
+      }
+      const confirmStep = plan.steps.find(step => step.action.confirmLabel);
+      const confirmLabel = _(confirmStep ? confirmStep.action.confirmLabel(confirmStep.args) : 'Confirm');
+      this._mode = 'action-confirm';
+      this._showActionView({heading, lines, buttons: [
+        [_('Cancel'), () => this.close(), true],
+        [confirmLabel, () => this._executeActionPlan(this._pendingPlan), false],
+      ]});
+      return;
+    }
+    this._executeActionPlan(plan);
+  }
+
+  _executeActionPlan(plan) {
+    this._mode = 'action-running';
+    this._pendingPlan = null;
+    this._showActionView({heading: _('Working…'), lines: [], buttons: []});
+    executePlan(plan).then(results => this._renderActionResult(results));
+  }
+
+  _renderActionResult(results) {
+    const lines = [];
+    let heading = '';
+    const single = results.length === 1;
+    const step = results[0].step;
+    if (single && step.action.risk === 'read-only') {
+      heading = step.action.title(step.args).replace(/^Check /, '');
+      lines.push(results[0].message);
+    } else {
+      for (const result of results)
+        lines.push(`${result.ok ? '✓' : '✗'} ${result.message}`);
+      if (!single && results.some(result => !result.ok))
+        heading = _('Plan stopped at the first failure');
+    }
+    const buttons = [];
+    const copyable = single && step.action.risk === 'read-only' && results[0].ok;
+    if (copyable)
+      buttons.push([_('Copy'), () => this._copyActionText(results[0].message), true]);
+    buttons.push([_('Done'), () => this.close(), true]);
+    this._mode = 'action-result';
+    this._showActionView({heading, lines, buttons});
+  }
+
+  _copyActionText(text) {
+    St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, text);
+    const copyButton = this._writingControls.get_children().find(button => button.label === _('Copy'));
+    if (copyButton)
+      copyButton.label = _('Copied');
+  }
+
 
   _setResults(items, limit = RESULT_LIMIT) {
     this._items = items.slice(0, limit);
@@ -705,7 +932,7 @@ export class LauncherPalette {
 
       const typeLabel = new St.Label({
         style_class: 'gdi-result-type',
-        text: this._getTypeLabel(item.type),
+        text: item.suggested ? _('Suggested') : this._getTypeLabel(item.type),
         y_align: Clutter.ActorAlign.CENTER,
       });
       typeLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
@@ -771,6 +998,7 @@ export class LauncherPalette {
     this._requestHistory = [];
     this._followup.hide();
     this._launcherNote.hide();
+    this._pendingPlan = null;
     if (this._mode === 'writing-loading' && this._writingContext)
       cancelTransform(this._writingContext.token);
     this._writingGeneration++;
@@ -1219,6 +1447,10 @@ export class LauncherPalette {
       return _('Web');
     case 'calc':
       return _('Calculator');
+    case 'action':
+      return _('Action');
+    case 'action-searching':
+      return '';
     case 'writing-action':
       return '';
     default:
@@ -1366,6 +1598,12 @@ export class LauncherPalette {
     if (!item)
       return;
 
+    if (item.type === 'action-searching')
+      return;
+    if (item.type === 'action') {
+      this._runActionPlan(item.plan);
+      return;
+    }
     if (item.type === 'selection-intent') {
       if (item.promptOnly) {
         this._writingAction = {key: item.actionKey, label: item.name};
@@ -1396,6 +1634,7 @@ export class LauncherPalette {
     const context = global.create_app_launch_context(0, -1);
     try {
       if (item.type === 'app') {
+        recordActionUse('app.open', item.name);
         if (!item.appInfo.launch([], context))
           Main.notify(_('Could not launch %s').format(item.name));
       } else if (item.type === 'file') {

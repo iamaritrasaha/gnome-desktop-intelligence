@@ -69,8 +69,38 @@ identity and Phase 1/2 interactions remain accepted and frozen.
 GTK4 single-line capture remains excluded. No broader agent automation,
 webview/framework, model training or simulated editing fallback.
 
-## Phase 4 — controlled system actions (not started)
+## Phase 4 — native GNOME actions
 
-No broader agent automation has been implemented. A future typed action registry
-would need separate authorization and narrow capabilities; arbitrary shell
-access remains excluded.
+- [x] Typed action registry with stable ids, risk classes and argument
+  validation; no generic shell tool at any layer.
+- [x] Native backends only: GVC audio, GSettings (color scheme, Night Light,
+  text scaling), NetworkManager/BlueZ/power-profiles-daemon D-Bus, Settings
+  Daemon brightness, GIO launch/filesystem, /proc and UPower facts.
+- [x] Deterministic natural-language routing (inspectable rule table) with
+  launcher precedence preserved; native action/confirmation/result UI.
+- [x] Confirmation policy: immediate for read-only/reversible/obvious actions;
+  compact confirmation for Wi-Fi off, text-size changes and Bluetooth off
+  when devices are connected.
+- [x] Read-only system information: disk, memory, network/IP, battery, plus
+  state checks for audio, Bluetooth, Wi-Fi, power profile, appearance,
+  Night Light, brightness and text size.
+- [x] Bounded multi-step plans (≤3 steps, all parts must parse, stop at first
+  failure, plan shown when any step needs confirmation).
+- [x] File/app intelligence: `find <terms> <ext>`, `modified today` filter,
+  known-folder opening; no content indexing.
+- [x] Gated model fallback: routing model maps at most one registered action,
+  re-validated in Shell, marked "Suggested"; invalid calls fall back to Ask.
+- [x] Ranking-only learning (opt-in) for frequently used apps/folders; safety
+  policy unaffected.
+- [x] Diagnostics: parsed intent, routing source, action, args, risk, latency,
+  result, failure reason and invalid model tool calls via bounded `ActionStats`.
+- [x] Regression suites: parser/registry unit tests, service RouteAction
+  regression on a private bus, nested GNOME 46 action probes.
+- [ ] Physical everyday acceptance of the action flows on the real desktop.
+
+Deferred, not abandoned: Gecko field replacement and passive writing, GTK4
+single-line capture, IBus-based writing input. Out of scope for Phase 4:
+arbitrary shell execution, file deletion, package management, browser
+automation, email/calendar, autonomous background agents, model
+self-modification.
+

@@ -67,7 +67,7 @@ import sys
 path = Path(sys.argv[1])
 marker = "    this._updateShortcut();\n  }\n\n  disable()"
 source = path.read_text()
-source = source.replace("import Gio from 'gi://Gio';", "import Gio from 'gi://Gio';\nimport GLib from 'gi://GLib';\nimport {validateGeometry} from './geometry-regression.js';\nimport {validateIntelligence} from './intelligence-regression.js';")
+source = source.replace("import Gio from 'gi://Gio';", "import Gio from 'gi://Gio';\nimport GLib from 'gi://GLib';\nimport {validateGeometry} from './geometry-regression.js';\nimport {validateIntelligence, validateActions} from './intelligence-regression.js';")
 probe = r'''    if (global._gdiSmokeProbeStarted)
       return;
     global._gdiSmokeProbeStarted = true;
@@ -88,6 +88,7 @@ probe = r'''    if (global._gdiSmokeProbeStarted)
       (async () => {
       await validateGeometry(palette, report);
       await validateIntelligence(palette, report);
+      await validateActions(palette, report);
       const normalGeometry = palette._calculatePlacement(
         { x: 0, y: 0, width: 1920, height: 1080 }, 400, 32);
       const mediumGeometry = palette._calculatePlacement(
@@ -445,6 +446,21 @@ for expected in \
   'dynamic-height-shrink=true' \
   'shortcut-toggle-path=true' \
   'reduced-motion=true' \
+  'action-row-disk=true' \
+  'disk-info-result=true' \
+  'memory-info-result=true' \
+  'color-scheme-action=true' \
+  'audio-unavailable-graceful=true' \
+  'wifi-off-plans-confirmation=true' \
+  'confirmation-view=true' \
+  'confirmation-cancel-closes=true' \
+  'bluetooth-state-readable=true' \
+  'power-profile-readable=true' \
+  'network-status-readable=true' \
+  'multi-step-row=true' \
+  'multi-step-executed=true' \
+  'model-suggested-action-validated=true' \
+  'invalid-model-tool-call-falls-back-to-ask=true' \
   'probe-complete=true'; do
   if ! grep -Fq "GDI_TEST $expected" "$HOME/nested-shell.log"; then
     echo "Nested UI check did not pass: $expected" >&2
