@@ -21,6 +21,7 @@ glib-compile-schemas --strict "$extension_dir/schemas"
 cp "$(dirname "$0")/geometry-regression.js" "$extension_dir/geometry-regression.js"
 cp "$(dirname "$0")/intelligence-regression.js" "$extension_dir/intelligence-regression.js"
 cp "$(dirname "$0")/pointer-regression.js" "$extension_dir/pointer-regression.js"
+cp "$(dirname "$0")/perf-regression.js" "$extension_dir/perf-regression.js"
 python3 "$(dirname "$0")/mock-provider.py" "$test_root/mock-port" &
 mock_pid=$!
 for _ in $(seq 1 30); do test -f "$test_root/mock-port" && break; sleep .1; done
@@ -77,7 +78,7 @@ import sys
 path = Path(sys.argv[1])
 marker = "    this._updateShortcut();\n  }\n\n  disable()"
 source = path.read_text()
-source = source.replace("import Gio from 'gi://Gio';", "import Gio from 'gi://Gio';\nimport GLib from 'gi://GLib';\nimport {validateGeometry} from './geometry-regression.js';\nimport {validateIntelligence, validateActions, validateStress} from './intelligence-regression.js';\nimport {validatePointer} from './pointer-regression.js';")
+source = source.replace("import Gio from 'gi://Gio';", "import Gio from 'gi://Gio';\nimport GLib from 'gi://GLib';\nimport {validateGeometry} from './geometry-regression.js';\nimport {validateIntelligence, validateActions, validateStress} from './intelligence-regression.js';\nimport {validatePerf} from './perf-regression.js';\nimport {validatePointer} from './pointer-regression.js';")
 probe = r'''    if (global._gdiSmokeProbeStarted)
       return;
     global._gdiSmokeProbeStarted = true;
@@ -100,6 +101,7 @@ probe = r'''    if (global._gdiSmokeProbeStarted)
       await validateIntelligence(palette, report);
       await validateActions(palette, report);
       await validateStress(palette, report);
+      await validatePerf(palette, () => this._onShortcutPressed(), report);
       await validatePointer(palette, report);
       const normalGeometry = palette._calculatePlacement(
         { x: 0, y: 0, width: 1920, height: 1080 }, 400, 32);
@@ -292,6 +294,9 @@ export GDI_POINTER_APP_MARKER="$test_home/gdi-pointer-launch-confirmed"
 if dbus-run-session -- bash -euo pipefail -c '
   uuid="gdi@gnome.desktop.intelligence"
   gsettings set org.gnome.shell enabled-extensions "[\"$uuid\"]"
+  # The pointer probes sweep through the top-left corner for calibration;
+  # the hot corner would open the Overview and close the panel menu mid-test.
+  gsettings set org.gnome.desktop.interface enable-hot-corners false
 
   nested_display="gdi-test-$$"
   export GDI_NESTED_DISPLAY="$nested_display" GDK_BACKEND=wayland GTK_A11Y=atspi
@@ -336,8 +341,8 @@ if dbus-run-session -- bash -euo pipefail -c '
     exit 1
   fi
 
-  # Stress + real-pointer probes add well beyond the original window.
-  for _attempt in $(seq 1 400); do
+  # Stress + real-pointer + perf probes add well beyond the original window.
+  for _attempt in $(seq 1 1200); do
     if rg -q "GDI_TEST probe-complete=true" "$HOME/nested-shell.log"; then
       break
     fi
@@ -382,6 +387,7 @@ else
 fi
 
 cp "$HOME/writing-service-test.log" "$test_root/writing-service-test.log" 2>/dev/null || true
+cp "$test_root/mock-port.requests.json" "$GDI_TEST_ROOT/build/validation/mock-requests.json" 2>/dev/null || true
 mkdir -p "$GDI_TEST_ROOT/build/validation"
 cp "$HOME/nested-shell.log" "$GDI_TEST_ROOT/build/validation/shell.log"
 cp "$test_root/session.log" "$GDI_TEST_ROOT/build/validation/session.log"
@@ -416,6 +422,8 @@ for expected in \
   'history-list-has-entry=true' \
   'history-conversation-restored=true' \
   'history-continue-id-resumed=true' \
+  'history-rename-field-visible=true' \
+  'history-rename-works=true' \
   'history-continue-answers=true' \
   'history-delete-removes-row=true' \
   'history-clear-arms-confirm=true' \
@@ -530,12 +538,52 @@ for expected in \
   'pointer-tone-chip-present=true' \
   'pointer-chip-hover=true' \
   'pointer-chip-click-expands-tone=true' \
+  'pointer-more-chip-expands-more=true' \
+  'pointer-back-click-returns-to-root=true' \
+  'pointer-tone-option-activates=true' \
+  'pointer-error-cancel-click-closes=true' \
   'pointer-ask-row-opens-prompt=true' \
   'pointer-ask-answer-rendered=true' \
   'pointer-wheel-scrolls-answer=true' \
   'pointer-copy-click-copies=true' \
+  'pointer-code-copy-click-copies=true' \
   'pointer-clear-click-returns-to-launcher=true' \
   'pointer-surface-stable-after-sequence=true' \
+  'pointer-ask-loading-cancel-visible=true' \
+  'pointer-cancel-click-stops-generation=true' \
+  'pointer-clear-after-cancel-returns=true' \
+  'pointer-followup-field-shown=true' \
+  'pointer-followup-click-focuses=true' \
+  'pointer-followup-answered=true' \
+  'pointer-action-row-executes=true' \
+  'pointer-action-copy-click-copies=true' \
+  'pointer-action-done-click-closes=true' \
+  'pointer-confirm-view-shown=true' \
+  'pointer-confirm-cancel-click-closes=true' \
+  'pointer-scale-confirm-view-shown=true' \
+  'pointer-confirm-accept-executes=true' \
+  'pointer-history-open-row-opens-list=true' \
+  'pointer-history-row-opens-conversation=true' \
+  'pointer-history-delete-click-removes=true' \
+  'pointer-history-clear-click-arms=true' \
+  'pointer-history-clear-click-empties=true' \
+  'pointer-history-close-click-closes=true' \
+  'pointer-panel-menu-opens=true' \
+  'pointer-panel-settings-activates=true' \
+  'pointer-panel-history-opens=true' \
+  'pointer-writing-chips-from-capture=true' \
+  'pointer-writing-chip-request-completes=true' \
+  'pointer-retry-click-reloads=true' \
+  'pointer-replace-click-applies=true' \
+  'pointer-undo-click-restores=true' \
+  'pointer-done-click-closes=true' \
+  'perf-shortcut-opens-palette=true' \
+  'perf-shortcut-under-600ms=true' \
+  'perf-keystroke-results-immediate=true' \
+  'perf-action-row-under-500ms=true' \
+  'perf-file-result-under-2000ms=true' \
+  'perf-ask-first-delta-under-2500ms=true' \
+  'stress-shell-rss-stable=true' \
   'probe-complete=true'; do
   if ! grep -Fq "GDI_TEST $expected" "$HOME/nested-shell.log"; then
     echo "Nested UI check did not pass: $expected" >&2

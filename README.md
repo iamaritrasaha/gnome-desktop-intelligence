@@ -32,6 +32,17 @@ GDI combines both into one native GNOME surface:
 
 No accounts. No cloud. No telemetry. Your text stays on your computer.
 
+## Screenshots
+
+| | |
+| --- | --- |
+| ![The GDI launcher with app results](docs/images/launcher.png) | ![Ask Intelligence answering with Markdown](docs/images/ask.png) |
+| ![Writing Tools chips for a selection](docs/images/writing-tools.png) | ![Intelligence History](docs/images/history.png) |
+
+The launcher, Ask, Writing Tools and History are the same 500 px native GNOME
+surface — one palette that grows with its content and inherits the active
+light/dark theme.
+
 ## Features
 
 **Instant launcher** — Apps, files, web search and a calculator. Deterministic
@@ -69,6 +80,22 @@ GDI is built from the GNOME stack, not on top of a cross-platform framework:
 There is no Qt, KDE, Electron or Tauri code, and no arbitrary shell execution
 at any layer: every desktop action goes through a small, inspectable registry
 of typed, validated actions.
+
+## Architecture
+
+GDI splits into two processes. The GNOME Shell extension holds only UI,
+keyboard and clipboard work. A separately D-Bus-activated session service
+(Python/PyGObject) owns everything else: AT-SPI text access, model routing,
+the provider abstraction (Ollama first), the quality gates, conversation
+history and the local learning store. A provider failure can therefore never
+take the Shell down, and search and launch work with no AI backend at all.
+
+Model lifecycle is deliberate: requests are scheduled with explicit priorities
+(Ask first, passive correction and prediction yield or are cancelled), models
+are kept warm only by policy and expire through Ollama's own mechanism, and
+nothing is ever polled while idle. The full design — including the capability
+model, the closed correction algebra and the measured Firefox compatibility
+matrix — is documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Installation
 

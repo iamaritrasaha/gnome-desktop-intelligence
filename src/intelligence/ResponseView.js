@@ -3,6 +3,7 @@ import Clutter from 'gi://Clutter';
 import St from 'gi://St';
 import Pango from 'gi://Pango';
 import Gio from 'gi://Gio';
+import {gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {diffMarkup, markdownBlocks, responseLinks, stableStreamView} from './Presentation.js';
 
 export function textLabel(markup, style = 'gdi-writing-text') {
@@ -31,11 +32,11 @@ export function addDiff(parent, original, suggestion, compact = false) {
 function addCodeBlock(parent, block) {
   const container = new St.BoxLayout({vertical: true, x_expand: true, style_class: 'gdi-markdown-code'});
   const header = new St.BoxLayout({x_expand: true, style_class: 'gdi-code-header'});
-  const copy = new St.Button({style_class: 'button flat gdi-code-copy', label: 'Copy',
+  const copy = new St.Button({style_class: 'button flat gdi-code-copy', label: _('Copy'),
     can_focus: true, x_align: Clutter.ActorAlign.END});
   copy.connect('clicked', () => {
     St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, block.raw ?? '');
-    copy.label = 'Copied';
+    copy.label = _('Copied');
   });
   header.add_child(copy);
   container.add_child(header);
@@ -66,7 +67,7 @@ export function addMarkdown(parent, text) {
     (button.get_child().clutter_text ?? button.get_child()).ellipsize = Pango.EllipsizeMode.END;
     button.connect('clicked', () => {
       try { Gio.AppInfo.launch_default_for_uri(uri, global.create_app_launch_context(0, -1)); }
-      catch { button.label = 'Could not open link'; }
+      catch { button.label = _('Could not open link'); }
     });
     parent.add_child(button);
   };
@@ -81,11 +82,9 @@ export function addMarkdown(parent, text) {
 
 /* Incremental streaming renderer. Completed lines become rendered Markdown
  * blocks (kept when unchanged); the partial trailing line is plain text, and
- * hidden while it still contains raw syntax tokens. finish() hands the whole
- * response to the complete renderer (links, code copy controls). */
+ * hidden while it still contains raw syntax tokens. */
 export class StreamRenderer {
   constructor(parent) {
-    this._parent = parent;
     this._box = new St.BoxLayout({vertical: true, x_expand: true, style_class: 'gdi-stream'});
     parent.add_child(this._box);
     this._blocks = [];
@@ -126,11 +125,6 @@ export class StreamRenderer {
       this._tail.destroy();
       this._tail = null;
     }
-  }
-
-  finish(text) {
-    this.destroy();
-    addMarkdown(this._parent, text);
   }
 
   destroy() {

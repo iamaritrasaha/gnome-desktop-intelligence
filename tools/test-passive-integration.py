@@ -280,7 +280,13 @@ try:
     reset(); type_sentence(); wait(lambda: probe()['passiveVisible'],'offer after reenable')
     keyboard.chord(0xff1b)
     report('disable-reenable-no-leaked-listeners-timers-bindings')
-    assert all(row['body']['keep_alive']==0 and row['body']['model']==settings.get_string('model-quick-writing') for row in calls())
+    # The residency policy owns keep_alive now: quick-model requests must
+    # carry a real warm window (extended to 180s while writing is active),
+    # never the retired keep_alive=0 contract. Exact per-mode values are
+    # unit-covered by tools/test-residency.py.
+    assert all(row['body']['keep_alive'] in (90, 180) and
+               row['body']['model'] == settings.get_string('model-quick-writing')
+               for row in calls())
     print('FINAL',stats(),flush=True)
     (project/'build/validation/phase3-metrics.json').write_text(json.dumps(dict(stats(), idle_cpu_percent=cpu_percent, model_calls=len(calls()), measured_debounce_ms=debounce_ms),indent=2))
 finally:

@@ -284,6 +284,22 @@ export async function validateIntelligence(palette, report) {
   report('history-conversation-restored', palette._writingContent.get_children().some(c =>
     (c.text ?? '').includes('Markdown fixture')));
   report('history-continue-id-resumed', palette._conversationId === savedConversationId);
+  // Rename must surface a visible, focused entry (it once stayed hidden with
+  // the search row) and apply the new title on Enter.
+  palette._startHistoryRename();
+  await pause(150);
+  report('history-rename-field-visible', palette._mode === 'history-rename' &&
+    palette._searchRow.visible && palette._entry.contains(global.stage.get_key_focus()));
+  palette._entry.set_text('Renamed fixture conversation');
+  await nativeKey('enter');
+  await until(() => palette._mode === 'history-conversation');
+  await pause(150);
+  // The heading is a box with an inner label, so scan one level deep.
+  const headingText = () => palette._writingContent.get_children()
+    .flatMap(child => [child, ...(child.get_children?.() ?? [])])
+    .map(child => child.text ?? '').join('\n');
+  report('history-rename-works', palette._historyConversation?.title === 'Renamed fixture conversation' &&
+    headingText().includes('Renamed fixture conversation'));
   palette._followup.set_text('EchoFixture: history continued answer');
   palette._followup.clutter_text.emit('activate');
   await until(() => palette._mode === 'writing-result');

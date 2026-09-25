@@ -87,10 +87,6 @@ export function captureCaretContext(pid, kind, callback) {
   call('GetCaretContext', '(is)', [pid, kind], 4000, callback);
 }
 
-export function acceptPrediction(token, words, callback) {
-  call('AcceptPrediction', '(si)', [token, words], 5000, callback);
-}
-
 export function transform(request, callback) {
   call('Transform', '(sssssssssssiii)', [
     request.token,

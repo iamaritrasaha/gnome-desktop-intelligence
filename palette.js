@@ -19,7 +19,6 @@ import { calculateExpression } from './src/search/Calculator.js';
 import { searchApps } from './src/search/AppSearch.js';
 import { cancelFileSearch, searchFiles } from './src/search/FileSearch.js';
 import {
-  acceptPrediction,
   actionStats,
   cancelTransform,
   captureCaretContext,
@@ -46,9 +45,9 @@ import {
   undoReplacement,
 } from './src/intelligence/ServiceClient.js';
 
-import { askQueryRemainder, historyGroups, isResponse, preferAssistant, selectionIntent, selectionIntentParts } from './src/intelligence/Presentation.js';
+import { askQueryRemainder, historyGroups, isResponse, preferAssistant, selectionIntentParts } from './src/intelligence/Presentation.js';
 import { addDiff, addMarkdown, StreamRenderer } from './src/intelligence/ResponseView.js';
-import { MORE_ACTIONS, TONE_ACTIONS, writingMenuFor } from './src/intelligence/WritingMenu.js';
+import { writingMenuFor } from './src/intelligence/WritingMenu.js';
 import { parseActionPlan, parseFileQuery } from './src/actions/parser.js';
 import {
   beginActionTrace,
@@ -183,8 +182,6 @@ export class LauncherPalette {
       can_focus: true,
     });
     this._palette.set_pivot_point(0.5, 0.5);
-    if (!this._animationsEnabled)
-      this._palette.add_style_class_name('gdi-reduced-motion');
 
     const searchRow = new St.BoxLayout({
       name: 'gdi-search-row',
@@ -248,6 +245,17 @@ export class LauncherPalette {
       x_expand: true,
     });
     this._writingScroll.set_child(this._writingContent);
+    // While an answer streams and the reader is at the bottom, keep the
+    // newest text in view: the pin applies after allocation grows the
+    // adjustment, so it survives every layout pass until the user scrolls.
+    this._streamPinned = false;
+    this._writingScroll.vadjustment.connect('changed', () => {
+      if (!this._streamPinned)
+        return;
+      const adjustment = this._writingScroll.vadjustment;
+      adjustment.value = Math.max(adjustment.lower,
+        adjustment.upper - adjustment.page_size);
+    });
     this._writingControls = new St.BoxLayout({
       style_class: 'gdi-writing-controls',
       x_expand: true,
@@ -379,7 +387,9 @@ export class LauncherPalette {
       GLib.source_remove(this._focusTimeoutId);
     this._focusTimeoutId = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
       this._focusTimeoutId = 0;
-      if (this._isOpen)
+      // The history surface hides the search row; focusing the hidden entry
+      // would swallow keystrokes until the list finishes loading.
+      if (this._isOpen && this._searchRow.visible)
         global.stage.set_key_focus(this._entry);
       return GLib.SOURCE_REMOVE;
     });
@@ -527,11 +537,10 @@ export class LauncherPalette {
       return;
 
     if (this._animationsEnabled) {
-      this._palette.remove_style_class_name('gdi-reduced-motion');
+      this._palette.remove_all_transitions();
       return;
     }
 
-    this._palette.add_style_class_name('gdi-reduced-motion');
     this._palette.remove_all_transitions();
     for (const row of this._results.get_children()) {
       row.remove_all_transitions();
@@ -1192,7 +1201,7 @@ export class LauncherPalette {
     this._disposeStream = null;
     this._streamRenderer?.destroy();
     this._streamRenderer = null;
-    this._streamTailLabel = null;
+    this._streamPinned = false;
     if (this._streamTimer) GLib.source_remove(this._streamTimer);
     this._streamTimer = 0;
   }
@@ -1378,6 +1387,12 @@ export class LauncherPalette {
       });
       this._writingControls.add_child(back);
     }
+    // Larger text scales can make one chip row wider than the palette;
+    // stack the chips vertically instead of clipping them.
+    const availableWidth = Math.max(1, this._palette.width - 32);
+    const [, naturalWidth] = this._writingControls.get_preferred_width(-1);
+    if (naturalWidth > availableWidth)
+      this._writingControls.vertical = true;
     this._schedulePosition();
     const first = this._writingControls.get_first_child();
     if (first)
@@ -1574,6 +1589,8 @@ export class LauncherPalette {
         return;
       this._mode = 'history-conversation';
       this._historyConversation = conversation;
+      this._searchRow.hide();
+      this._writingView.show();
       this._writingContent.destroy_all_children();
       this._writingControls.destroy_all_children();
       this._addWritingHeading(conversation.title || _('Conversation'));
@@ -1629,9 +1646,13 @@ export class LauncherPalette {
     if (!this._historyConversation)
       return;
     this._mode = 'history-rename';
+    // The search row was hidden with the history list; show it again so the
+    // rename field is actually visible while it holds key focus.
     this._entry.hint_text = _('New title…');
     this._entry.set_text(this._historyConversation.title ?? '');
     this._clearResults();
+    this._searchRow.show();
+    this._writingView.hide();
     global.stage.set_key_focus(this._entry);
     this._schedulePosition();
   }
@@ -1737,6 +1758,7 @@ export class LauncherPalette {
       this._stopStream();
       this._stopProcessing();
       this._writingGeneration++;
+      this._cancelledByUser = true;
       this._renderWritingResult('', _('Generation cancelled.'));
     }, true);
     global.stage.set_key_focus(this._writingControls.get_first_child());
@@ -1812,8 +1834,13 @@ export class LauncherPalette {
           if (!this._isOpen || generation !== this._writingGeneration) return GLib.SOURCE_REMOVE;
           if (!this._streamRenderer)
             this._streamRenderer = new StreamRenderer(this._writingContent);
+          // Follow the stream only while the reader is at the bottom; the
+          // adjustment hook above keeps the view pinned after each growth.
+          const adjustment = this._writingScroll.vadjustment;
+          this._streamPinned = adjustment.value + adjustment.page_size >=
+            adjustment.upper - 24;
           this._streamRenderer.update(this._streamText);
-          this._schedulePosition();
+          this._positionPalette();
           return GLib.SOURCE_REMOVE;
         });
       }, completed);
@@ -1836,6 +1863,7 @@ export class LauncherPalette {
     this._stopStream();
     this._stopProcessing();
     this._followup.hide();
+    this._cancelledByUser = false;
     this._mode = error ? 'writing-error' : 'writing-result';
     this._searchRow.hide();
     this._clearResults();
@@ -1845,7 +1873,7 @@ export class LauncherPalette {
     this._writingView.show();
     this._writingScroll.show();
 
-    this._addWritingHeading(error ? _('Intelligence') : _(this._writingAction.label));
+    this._addWritingHeading(this._writingAction?.label ?? _('Intelligence'));
     if (error) {
       const message = new St.Label({
         style_class: 'gdi-writing-error',
@@ -1886,12 +1914,14 @@ export class LauncherPalette {
       this._addWritingButton(_('Copy original'), () => St.Clipboard.get_default().set_text(
         St.ClipboardType.CLIPBOARD, this._writingContext.selected), true);
     }
-    if (!error || !suggestion) this._addWritingButton(_('Retry'), () => {
+    // Retry is always offered: a failed replacement with a retained
+    // suggestion must keep a way forward, not only Copy and Clear.
+    this._addWritingButton(_('Retry'), () => {
       if (response && this._conversationId)
         historyTrim(this._conversationId, 'assistant').catch(() => {});
       this._startWritingRequest(this._writingAction, this._writingQuestion);
     }, true);
-    if (error && !suggestion && error !== _('Generation cancelled.')) this._addWritingButton(_('AI Settings'), () => { this.close(); this._openSettings(); }, true);
+    if (error && !suggestion && !this._cancelledByUser) this._addWritingButton(_('AI Settings'), () => { this.close(); this._openSettings(); }, true);
     this._addWritingButton(response ? _('Clear') : _('Cancel'), () => {
       if (!response) { this.close(); return; }
       releaseContext(this._writingContext?.token);
@@ -1918,29 +1948,6 @@ export class LauncherPalette {
     label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
     heading.add_child(label);
     this._writingContent.add_child(heading);
-  }
-
-  _addPreviewSection(title, text, original = false) {
-    const section = new St.BoxLayout({
-      style_class: original ? 'gdi-writing-section gdi-writing-original' : 'gdi-writing-section',
-      vertical: true,
-      x_expand: true,
-    });
-    section.add_child(new St.Label({
-      style_class: 'gdi-writing-section-title',
-      text: title,
-    }));
-    const label = new St.Label({
-      style_class: 'gdi-writing-text',
-      text,
-      opacity: original ? 190 : 255,
-      x_expand: true,
-    });
-    label.clutter_text.line_wrap = true;
-    label.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
-    label.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
-    section.add_child(label);
-    this._writingContent.add_child(section);
   }
 
   _addWritingButton(label, action, flat = false) {
@@ -2124,8 +2131,6 @@ export class LauncherPalette {
       return _('Calculator');
     case 'action':
       return _('Action');
-    case 'action-searching':
-      return '';
     case 'history-open':
       return '';
     default:
@@ -2177,17 +2182,8 @@ export class LauncherPalette {
     }
 
     if (this._mode === 'writing-actions') {
-      // Chip rows: arrows move within the row, Enter activates focus.
-      if (key === Clutter.KEY_Left || key === Clutter.KEY_Right) {
-        const buttons = this._writingControls.get_children();
-        const focus = global.stage.get_key_focus();
-        const index = buttons.findIndex(button => button === focus);
-        if (buttons.length && index >= 0) {
-          const next = (index + (key === Clutter.KEY_Right ? 1 : -1) + buttons.length) % buttons.length;
-          global.stage.set_key_focus(buttons[next]);
-        }
-        return Clutter.EVENT_STOP;
-      }
+      // Left/Right belong to the text cursor while typing; chip navigation
+      // for focused chips is handled in _onCapturedEvent.
       if (key === Clutter.KEY_Return || key === Clutter.KEY_KP_Enter) {
         const focus = global.stage.get_key_focus();
         if (focus && this._writingControls.contains(focus))
@@ -2262,8 +2258,13 @@ export class LauncherPalette {
     if (event.type() === Clutter.EventType.KEY_PRESS &&
         this._writingView.visible &&
         [Clutter.KEY_Tab, Clutter.KEY_ISO_Left_Tab].includes(event.get_key_symbol())) {
-      const buttons = [...this._writingControls.get_children(),
+      // Tab follows the visual stack: the search entry (when visible), the
+      // response content (links, code Copy), the action buttons, then the
+      // follow-up field.
+      const entry = this._searchRow.visible ? [this._entry] : [];
+      const buttons = [...entry,
         ...this._writingContent.get_children().filter(child => child.can_focus),
+        ...this._writingControls.get_children(),
         ...(this._followup.visible ? [this._followup] : [])];
       if (buttons.length) {
         const focus = global.stage.get_key_focus();
@@ -2276,6 +2277,26 @@ export class LauncherPalette {
         global.stage.set_key_focus(buttons[next]);
       }
       return Clutter.EVENT_STOP;
+    }
+
+    if (event.type() === Clutter.EventType.KEY_PRESS &&
+        this._mode === 'writing-actions' &&
+        [Clutter.KEY_Left, Clutter.KEY_Right].includes(event.get_key_symbol())) {
+      // Chip rows: arrows move within the row — but never while the entry
+      // holds focus, where they belong to the text cursor.
+      const focus = global.stage.get_key_focus();
+      if (focus && !this._entry.contains(focus)) {
+        const buttons = this._writingControls.get_children();
+        const index = buttons.findIndex(button => button === focus ||
+          (focus && button.contains(focus)));
+        if (buttons.length && index >= 0) {
+          const next = (index + (event.get_key_symbol() === Clutter.KEY_Right ? 1 : -1) +
+            buttons.length) % buttons.length;
+          global.stage.set_key_focus(buttons[next]);
+          return Clutter.EVENT_STOP;
+        }
+      }
+      return Clutter.EVENT_PROPAGATE;
     }
 
     if (event.type() === Clutter.EventType.KEY_PRESS &&
@@ -2339,8 +2360,6 @@ export class LauncherPalette {
     if (!item)
       return;
 
-    if (item.type === 'action-searching')
-      return;
     if (item.type === 'history-open') {
       this._showHistoryList();
       return;

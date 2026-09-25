@@ -53,6 +53,3 @@ export function writingMenuFor({selected = false, capabilities = null} = {}) {
   return CONTEXT_PRIMARY.filter(item =>
     item.key !== 'continue' || canInsert);
 }
-
-export const WRITING_MENU_TONE = 'tone';
-export const WRITING_MENU_MORE = 'more';

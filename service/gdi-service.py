@@ -231,7 +231,8 @@ class GdiService(SelectionContext):
                 return GLib.SOURCE_CONTINUE
             if time.monotonic() - max(self._started, self._last_model_activity) < IDLE_EXIT_AFTER_SECONDS:
                 return GLib.SOURCE_CONTINUE
-        except Exception:
+        except Exception as error:
+            print(f"GDI idle-watch check failed: {error}", flush=True)
             return GLib.SOURCE_CONTINUE
         print('GDI session service idle; exiting until next use', flush=True)
         if self._request_quit is not None:
@@ -742,13 +743,15 @@ class GdiService(SelectionContext):
                 self._request_stats.append({'action': request['action'], 'status': 'cancelled',
                     'total_ms': round((time.monotonic() - request['started']) * 1000)})
                 self._request_stats[:] = self._request_stats[-50:]
+            # Abort the transport before the slot is freed, so a promoted
+            # queued request never overlaps the dying one on a one-GPU budget.
+            request["cancellable"].cancel()
             # A queued request is dropped from the scheduler (its slot goes to
             # the next waiter); a running one is cancelled through its
             # cancellable and reports the cancellation on its own callback.
             ticket = request.pop('ticket', None)
             if ticket is not None:
                 ticket.drop()
-            request["cancellable"].cancel()
             request["invocation"].return_dbus_error(
                 f"{INTERFACE}.Error.Cancelled", "Writing request was cancelled.")
 

@@ -302,13 +302,18 @@ Both explicit and passive writing use this shared diff. Passive still receives
 only the existing short changed excerpt; the whole paragraph is not duplicated.
 No markup from a provider is accepted as trusted Pango or HTML.
 
-Ask keeps the 500px launcher and the stable top edge, with a scroll area capped
-at 310px and reduced further for smaller monitors. Streaming uses a plain-text
-label refreshed at most every 80ms; completed responses render headings, lists,
+Ask keeps the 500px launcher and the stable top edge; the content area grows
+with content up to a work-area-relative maximum (60% of the available work
+area, clamped to 220–520 px, owned by palette.js) and scrolls internally
+afterwards. Streaming is buffered: completed lines become rendered blocks, the
+plain-text tail refreshes at most every 80ms, and while the reader stays at
+the bottom the view follows the newest text. Completed responses render
+headings, lists,
 bold, inline code, fenced code and native focusable HTTP(S) links. Links with
 credentials and non-web schemes are not activated. Code is display/copy only.
 Markdown tables, images, nested-list layout and LaTeX are plain text, not a web
-renderer. Tab traverses response actions, links and the follow-up field;
+renderer. Tab traverses the search entry, response actions, links and the
+follow-up field;
 Page Up/Down scroll, Enter submits a focused follow-up, Escape closes/cancels.
 
 Copy, Retry and Clear are normal assistant controls. Retry reuses the context

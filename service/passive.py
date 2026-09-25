@@ -57,6 +57,7 @@ class PassiveWriting:
         self.predict_cancel = None
         self.anchor_nonce = self.anchor_cache = None
         self.anchor_retry = None
+        self.anchor_feature = None
         self.generation = 0
         self.predict_generation = 0
         self.backoff_until = 0
@@ -264,7 +265,9 @@ class PassiveWriting:
                     self.dismiss_prediction('caret')
                 if self.post:
                     self.finish_post()
-        except Exception:
+        except Exception as error:
+            self.metrics['observer_error_' + type(error).__name__] += 1
+            self._trace('event-error', error=type(error).__name__)
             self.dismiss('unavailable')
 
     def _resolve_anchor(self, source, caret, retry=None, timer_name='timer', expiry=None):
@@ -287,6 +290,9 @@ class PassiveWriting:
             return anchor
         self.anchor_nonce = secrets.token_urlsafe(18)
         self.anchor_retry = retry or self._trigger
+        # One pending anchor request at a time: the feature that asked owns
+        # the nonce until set_anchor answers or its expiry clears it.
+        self.anchor_feature = 'prediction' if timer_name == 'predict_timer' else 'passive'
         self.emit('PassiveAnchorRequest', self.anchor_nonce)
         self._drop_timer(timer_name)
         setattr(self, timer_name, GLib.timeout_add(600, expiry or (lambda: self.dismiss('no-anchor'))))
@@ -334,6 +340,11 @@ class PassiveWriting:
             if self.last_source == (source, start, fingerprint):
                 self._trace('duplicate-source')
                 return GLib.SOURCE_REMOVE
+            if self.anchor_nonce and self.anchor_feature == 'prediction':
+                # The prediction cycle is waiting for its own anchor; a second
+                # request here would overwrite its nonce and silently drop it.
+                self._trace('anchor-busy-prediction')
+                return GLib.SOURCE_REMOVE
             anchor = self._resolve_anchor(source, caret)
             if anchor is None:
                 return GLib.SOURCE_REMOVE
@@ -377,10 +388,16 @@ class PassiveWriting:
             generation = self.generation
             self.cancel = Gio.Cancellable()
             ticket_holder = {}
+            metadata = {}
 
             def release_ticket():
                 ticket = ticket_holder.pop('ticket', None)
                 if ticket is not None:
+                    # Mirror the explicit paths: the residency manager learns
+                    # the request ended, so its active counter and latency
+                    # samples stay truthful for the quick model.
+                    self.service._residency.observe_request_end(
+                        'quick', self.settings.get_string('model-quick-writing'), metadata)
                     ticket.release()
 
             def completed(response, error):
@@ -445,13 +462,15 @@ class PassiveWriting:
                     self._trace('request', model=self.settings.get_string('model-quick-writing'))
                     self.service._router.run_passive(text, self.settings, self.cancel,
                                                      completed,
-                                                     residency=self.service._residency)
+                                                     residency=self.service._residency,
+                                                     metadata=metadata)
                 except Exception as error:
                     self._trace('request-failed', error=type(error).__name__)
                     completed(None, error)
 
             ticket = self.service._scheduler.submit(
                 'passive', PASSIVE, start_passive_request,
+                cancellable=self.cancel,
                 on_ticket=lambda t: ticket_holder.update(ticket=t))
             if ticket is None:
                 # Foreground intelligence work owns the model right now; the
@@ -537,6 +556,10 @@ class PassiveWriting:
                 self.metrics['prediction_context_suppressed'] += 1
                 self._trace('prediction-ineligible', reason='context')
                 return GLib.SOURCE_REMOVE
+            if self.anchor_nonce and self.anchor_feature == 'passive':
+                # A correction is waiting for its anchor; do not overwrite it.
+                self._trace('prediction-ineligible', reason='anchor-busy')
+                return GLib.SOURCE_REMOVE
             anchor = self._resolve_anchor(
                 source, caret, retry=self._prediction_trigger,
                 timer_name='predict_timer',
@@ -576,19 +599,31 @@ class PassiveWriting:
             self.predict_cancel = Gio.Cancellable()
             started = now
             predict_ticket_holder = {}
+            predict_metadata = {}
 
             def release_predict_ticket():
                 ticket = predict_ticket_holder.pop('ticket', None)
                 if ticket is not None:
+                    self.service._residency.observe_request_end(
+                        'quick', self.settings.get_string('model-quick-writing'),
+                        predict_metadata)
                     ticket.release()
 
             def completed(continuation, error):
                 release_predict_ticket()
                 if generation != self.predict_generation:
                     return
+                was_cancelled = (self.predict_cancel is not None and
+                                 self.predict_cancel.is_cancelled())
                 self.predict_cancel = None
                 latency = round((time.monotonic() - started) * 1000)
                 if error:
+                    if was_cancelled:
+                        # Superseded by foreground work: unavailability, not a
+                        # provider failure.
+                        self._trace('prediction-cancelled', latency_ms=latency)
+                        self.service._release_context(token)
+                        return
                     self.metrics['prediction_provider_errors'] += 1
                     self._trace('prediction-error', latency_ms=latency)
                     self.service._release_context(token)
@@ -630,13 +665,14 @@ class PassiveWriting:
                         endpoint=self.settings.get_string('model-endpoint'),
                         model=self.settings.get_string('model-quick-writing'),
                         cancellable=self.predict_cancel, callback=completed,
-                        residency=self.service._residency)
+                        residency=self.service._residency, metadata=predict_metadata)
                 except Exception as error:
                     self._trace('prediction-request-failed', error=type(error).__name__)
                     completed(None, error)
 
             ticket = self.service._scheduler.submit(
                 'prediction', PREDICTION, start_prediction_request,
+                cancellable=self.predict_cancel,
                 on_ticket=lambda t: predict_ticket_holder.update(ticket=t))
             if ticket is None:
                 # Speculative work never races or queues behind foreground
@@ -702,6 +738,9 @@ class PassiveWriting:
                 pass
             # A short guarded undo watch; typing removes it and an immediate
             # undo is recorded as a negative prediction signal.
+            # Settle any still-running correction watch first: its outcome and
+            # timer must not be overwritten by the prediction's post state.
+            self.finish_post()
             self.post = dict(data, accessible=context['accessible'],
                 start=context['start'], end=context['end'], length=context['length'],
                 edit_end=context['undo_end'], dirty=False, range_uncertain=False,
@@ -730,6 +769,7 @@ class PassiveWriting:
             pass
         self.anchor_nonce = secrets.token_urlsafe(18)
         self.anchor_retry = lambda: self._reshow_prediction(data)
+        self.anchor_feature = 'prediction'
         self.emit('PassiveAnchorRequest', self.anchor_nonce)
         self.predict_expiry = GLib.timeout_add_seconds(
             PREDICTION_EXPIRY_SECONDS, lambda: self.dismiss_prediction('expired'))
@@ -764,6 +804,7 @@ class PassiveWriting:
         self._drop_timer('timer')
         self._drop_timer('predict_timer')
         self.anchor_nonce = None
+        self.anchor_feature = None
         self.anchor_cache = anchor
         retry, self.anchor_retry = self.anchor_retry, None
         if retry:
@@ -780,6 +821,7 @@ class PassiveWriting:
         if reason in ('dismissed', 'explicit'):
             self.finish_post()
         self.anchor_nonce = self.anchor_cache = None
+        self.anchor_feature = None
         self.generation += 1
         if self.cancel:
             self.cancel.cancel(); self.cancel = None

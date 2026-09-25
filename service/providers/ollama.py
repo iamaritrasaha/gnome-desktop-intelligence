@@ -101,6 +101,10 @@ class OllamaProvider(ModelProvider):
                         finish(last_object)
                     else:
                         finish(json.loads(chunks.decode("utf-8")))
+            except (json.JSONDecodeError, UnicodeDecodeError, UnicodeError) as error:
+                # A reachable server that sends garbage is a different failure
+                # than an unreachable one; report it as such.
+                failed(ProviderError("Ollama returned an invalid response. Retry the request."))
             except Exception as error:
                 failed(error)
 
@@ -113,7 +117,11 @@ class OllamaProvider(ModelProvider):
                     return
                 status = message.get_status()
                 if not 200 <= status < 300:
-                    raise ProviderError("The configured model is unavailable. Choose an installed text model in AI Settings." if status == 404 else "The AI provider is temporarily unavailable. Retry or check AI Settings.")
+                    # 404 names a missing model only for generation requests;
+                    # the discovery/observation endpoints have no model.
+                    if status == 404 and payload is not None:
+                        raise ProviderError("The configured model is unavailable. Choose an installed text model in AI Settings.")
+                    raise ProviderError("The AI provider is temporarily unavailable. Retry or check AI Settings.")
                 read_next()
             except Exception as error:
                 failed(error)

@@ -35,6 +35,22 @@ class Handler(BaseHTTPRequestHandler):
                 text = 'The previous answer discussed attention.'
             else:
                 text = 'Fixture answer. ' * 120 if body.get('stream') else 'selected phrase revised 🌙'
+            # Debug aid: log the matching decision for nested-probe triage.
+            try:
+                entry = {'at': round(time.time(), 3), 'first_line': first_line[:120],
+                         'stream': bool(body.get('stream')),
+                         'returned': text[:60], 'echo_marker': marker in prompt}
+                log_path = sys.argv[1] + '.requests.json'
+                try:
+                    with open(log_path) as sink:
+                        log = json.load(sink)
+                except Exception:
+                    log = []
+                log.append(entry)
+                with open(log_path, 'w') as sink:
+                    json.dump(log[-60:], sink)
+            except Exception:
+                pass
             if body.get('stream'):
                 for index in range(0, len(text), 180):
                     self.wfile.write((json.dumps({'done': False, 'message': {'content': text[index:index+180]}})+'\n').encode())
