@@ -131,9 +131,11 @@ const RULES = [
   // --- system information ------------------------------------------------
   // All information rules are anchored so multi-step splitting stays
   // unambiguous ("dark mode and disk space" must not parse as one query).
-  [/^(?:how much |what(?:'s| is) (?:the |my )?)?(?:disk|storage|drive) (?:space|usage|left|free)(?: do i have)?$|^free (?:disk |storage )?space$|^(?:disk|storage) free$|^how much (?:disk |storage )?space(?: do i have)?$/,
+  // "tell me/show me" variants keep multi-step requests such as
+  // "open downloads and tell me how much disk space I have" parseable.
+  [/^(?:tell me |show me )?(?:how much |what(?:'s| is) (?:the |my )?)?(?:disk|storage|drive) (?:space|usage|left|free)(?: do i have| i have)?$|^free (?:disk |storage )?space$|^(?:disk|storage) free$|^(?:tell me |show me )?how much (?:disk |storage )?space(?: do i have| i have)?$/,
     () => ({ id: 'system.diskUsage', args: {} })],
-  [/^(?:how much |what(?:'s| is) (?:the |my )?)?(?:memory|ram) (?:usage|status|use|used)(?: do i have)?$|^how much (?:memory|ram)(?: do i have)?$|^(?:memory|ram)$|^free memory$/,
+  [/^(?:tell me |show me )?(?:how much |what(?:'s| is) (?:the |my )?)?(?:memory|ram) (?:usage|status|use|used)(?: do i have| i have)?$|^(?:tell me |show me )?how much (?:memory|ram)(?: am i using| do i have| i have)?$|^(?:memory|ram)$|^free memory$/,
     () => ({ id: 'system.memoryStatus', args: {} })],
   [/^(?:what(?:'s| is|s) |show |tell me )?my (?:ip|ip address)$|^ip address$|^show ip$|^what(?:'s| is|s) my ip$|^network (?:status|state)$/,
     () => ({ id: 'system.networkStatus', args: {} })],
@@ -247,5 +249,22 @@ export function parseFileQuery(query) {
     tokens.pop();
     terms = tokens.join(' ');
   }
-  return { terms, extension, modifiedToday };
+  return {terms, extension, modifiedToday};
+}
+
+/*
+ * Bounded keyword gate for the routing-model fallback: the query must name a
+ * desktop capability AND look like a request — an action verb or a state
+ * question — rather than a bare noun phrase. "bluetooth technology" or
+ * "dark matter in space" name capabilities but are questions/topics, so they
+ * go to Ask Intelligence instead of the routing model.
+ */
+const MODEL_HINTS = /\b(volume|sound|audio|speaker|speakers|mute|louder|quieter|softer|bluetooth|wi-?fi|wireless|power ?saver|battery saver|performance mode|balanced|power profile|dark mode|light mode|dark theme|light theme|colou?r scheme|theme|appearance|night light|brightness|brighter|dimmer|text size|text scaling|disk|storage|memory|ram|my ip|ip address|network|battery)\b/;
+
+const REQUEST_SHAPE = /\b(turn|switch|set|make|put|crank|open|show|tell|enable|disable|shut|kill|mute|unmute|check|use|activate|select|change|increase|decrease|raise|lower|brighter|dimmer|louder|quieter|softer|is|are|what'?s|whats|how|do|can)\b/;
+
+export function mayNeedModelRouting(query) {
+  const normalized = normalizeQuery(query);
+  return normalized.length >= 3 && normalized.length <= 80 &&
+    MODEL_HINTS.test(normalized) && REQUEST_SHAPE.test(normalized);
 }

@@ -212,6 +212,11 @@ export function actionStats(callback) {
   });
 }
 
+/* Developer-only: clears the service's mirrored action diagnostic records. */
+export function resetActionDiagnostics() {
+  call('ResetActionStats', '()', [], 3000, () => {}, Gio.DBusCallFlags.NO_AUTO_START);
+}
+
 
 // Subscribe before dispatch; every terminal path removes the directed signal listener.
 export function streamTransform(request, onChunk, callback) {

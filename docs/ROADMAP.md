@@ -96,6 +96,13 @@ webview/framework, model training or simulated editing fallback.
   result, failure reason and invalid model tool calls via bounded `ActionStats`.
 - [x] Regression suites: parser/registry unit tests, service RouteAction
   regression on a private bus, nested GNOME 46 action probes.
+- [x] Live reliability audit (2026-09-25): every Phase 4 action verified
+  against the real host with state read-backs (`tools/verify-live-actions.py`
+  `--read-only`/`--reversible`); live-found defects repaired (negative-step
+  validation, model word-form coercion, request-shape routing gate,
+  model-sourced confirmations, closed-palette result guards) with
+  regression coverage; end-to-end per-invocation action traces and the hidden
+  `gdi diagnostics` view added.
 - [x] Physical everyday acceptance of the action flows on the real desktop
   (installed 2026-09-25; everyday verification handoff recorded in
   CURRENT_STATE).

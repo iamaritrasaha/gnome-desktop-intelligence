@@ -83,9 +83,12 @@ const cases = [
   ['text size', 'gnome.getTextScaling', {}],
 
   ['how much disk space do i have', 'system.diskUsage', {}],
+  ['tell me how much disk space i have', 'system.diskUsage', {}],
   ['disk space', 'system.diskUsage', {}],
   ['free disk space', 'system.diskUsage', {}],
   ['memory usage', 'system.memoryStatus', {}],
+  ['how much memory am i using', 'system.memoryStatus', {}],
+  ['tell me how much ram i have', 'system.memoryStatus', {}],
   ['how much ram', 'system.memoryStatus', {}],
   ['show my ip', 'system.networkStatus', {}],
   ['what is my ip', 'system.networkStatus', {}],
@@ -137,10 +140,29 @@ const plan = parseActionPlan('turn bluetooth off and switch to power saver');
 assert.deepEqual(plan.map(s => s.id), ['bluetooth.setState', 'power.setProfile']);
 assert.deepEqual(parseActionPlan('volume 30 then mute').map(s => s.id),
   ['audio.setVolume', 'audio.setMute']);
+assert.deepEqual(parseActionPlan('open downloads and tell me how much disk space i have').map(s => s.id),
+  ['directory.open', 'system.diskUsage']);
 assert.equal(parseActionPlan('turn bluetooth off and eat a sandwich'), null);
 assert.equal(parseActionPlan('volume 30 and 2 + 2'), null);
 assert.equal(parseActionPlan('volume 30 and'), null);
 assert.equal(parseActionPlan('search cats and dogs'), null);
+
+/* ---- routing-model keyword gate (pure parser function) ------------------ */
+// Capability noun phrases are questions/topics, not requests: they must not
+// reach the routing model and can therefore never toggle anything.
+const {mayNeedModelRouting} = parser;
+assert.equal(mayNeedModelRouting('bluetooth technology'), false);
+assert.equal(mayNeedModelRouting('dark matter'), false);
+assert.equal(mayNeedModelRouting('the history of wifi'), false);
+assert.equal(mayNeedModelRouting('what is ip addressing'), false);
+assert.equal(mayNeedModelRouting('memory foam mattress'), false);
+assert.equal(mayNeedModelRouting('please make my speakers quieter'), true);
+assert.equal(mayNeedModelRouting('kill bluetooth'), true);
+assert.equal(mayNeedModelRouting('set my screen brighter'), true);
+assert.equal(mayNeedModelRouting('is my wifi on'), true);
+assert.equal(mayNeedModelRouting('turn wifi off'), true); // parses deterministically anyway
+assert.equal(mayNeedModelRouting('what is the volume in mathematics'), true); // preferAssistant still wins first
+assert.equal(mayNeedModelRouting('vol'), false);
 
 /* ---- file query phrasing ----------------------------------------------- */
 assert.deepEqual(parseFileQuery('find resume pdf'),
@@ -173,6 +195,33 @@ assert.equal(validateArgs('gnome.setTextScaling', {factor: 1.25}).args.factor, 1
 assert.equal(validateArgs('bluetooth.setState', {enabled: false}).args.enabled, false);
 assert.equal(getAction('audio.setVolume').risk, RISK.STATE_CHANGE);
 assert.equal(getAction('system.diskUsage').risk, RISK.READ_ONLY);
+
+// Regression (live-host audit): relative steps may be negative. "volume down"
+// parses to step -10 and was wrongly rejected by the 0–100 percent type,
+// which sent volume down/quieter/dimmer to Ask Intelligence.
+assert.equal(validateArgs('audio.adjustVolume', {step: -10}).ok, true);
+assert.equal(validateArgs('audio.adjustVolume', {step: -10}).args.step, -10);
+assert.equal(validateArgs('audio.adjustVolume', {step: 25}).args.step, 25);
+assert.equal(validateArgs('audio.adjustVolume', {step: 0}).ok, false);
+assert.equal(validateArgs('audio.adjustVolume', {step: -150}).ok, false);
+assert.equal(validateArgs('display.adjustBrightness', {step: -10}).ok, true);
+
+// Regression (live-host audit): the routing model answers "off"/"on" as
+// words; the typed boundary repairs the representation only.
+assert.equal(validateArgs('bluetooth.setState', {enabled: 'off'}).args.enabled, false);
+assert.equal(validateArgs('bluetooth.setState', {enabled: 'on'}).args.enabled, true);
+assert.equal(validateArgs('wifi.setState', {enabled: 'false'}).args.enabled, false);
+assert.equal(validateArgs('bluetooth.setState', {enabled: 'maybe'}).reason, 'invalid-argument:enabled');
+assert.equal(validateArgs('gnome.setNightLight', {enabled: 'true'}).args.enabled, true);
+
+// Regression (live-host audit): the routing model returns human-label enums.
+assert.equal(validateArgs('power.setProfile', {profile: 'Power Saver'}).args.profile, 'power-saver');
+assert.equal(validateArgs('power.setProfile', {profile: 'Performance'}).args.profile, 'performance');
+assert.equal(validateArgs('power.setProfile', {profile: 'balanced mode'}).args.profile, 'balanced');
+assert.equal(validateArgs('gnome.setColorScheme', {scheme: 'dark'}).args.scheme, 'prefer-dark');
+assert.equal(validateArgs('gnome.setColorScheme', {scheme: 'light mode'}).args.scheme, 'default');
+assert.equal(validateArgs('power.setProfile', {profile: 'turbo'}).reason, 'invalid-argument:profile');
+assert.equal(validateArgs('gnome.setColorScheme', {scheme: 'pitch black'}).reason, 'invalid-argument:scheme');
 
 /* ---- confirmation policy ----------------------------------------------- */
 assert.equal(needsConfirmation('audio.setVolume', {percent: 30}).confirm, false);

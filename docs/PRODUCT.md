@@ -170,7 +170,11 @@ Supported actions and examples (full registry in ARCHITECTURE.md):
 - System information: `how much disk space do I have`, `memory usage`.
 
 Results are shown as compact native rows and views — “✓ Bluetooth turned off”,
-a disk/mem/IP answer, or a concise unavailable/error message. Small bounded
+a disk/mem/IP answer, or a concise unavailable/error message. Mutating actions
+verify the actual resulting state (the volume service, NetworkManager, BlueZ,
+power-profiles-daemon or GSettings is read back) before success is shown; a
+change that cannot be confirmed is reported as a failure, never as a silent
+success. Small bounded
 multi-step requests such as `turn bluetooth off and switch to power saver`
 execute as an ordered plan (at most three steps, no recursion); if any step
 needs confirmation, the whole plan is shown before execution. When
@@ -184,7 +188,11 @@ processes and arbitrary shell execution are excluded from this phase.
 Developer diagnostics (never shown in normal UI) record parsed intent,
 deterministic vs model routing, chosen action, arguments, risk class, latency,
 result and invalid model tool calls; they are inspectable via the service's
-`ActionStats`.
+`ActionStats` and, on the device, through the hidden `gdi diagnostics` palette
+command, which lists recent action traces with Copy and Reset controls.
+`tools/verify-live-actions.py` verifies the same native backends directly on
+an installed machine (`--read-only`, or `--reversible` to exercise and restore
+reversible state changes).
 
 ## Phase 5 — Writing Intelligence, predictive writing and Ask history
 

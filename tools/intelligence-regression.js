@@ -109,13 +109,52 @@ export async function validateActions(palette, report) {
   // marker must end the line — the mock echoes through the end of it.
   const mockEndpoint = `http://127.0.0.1:${GLib.getenv('GDI_MOCK_PORT')}`;
   palette._settings.set_string('model-endpoint', mockEndpoint);
-  await reopen('volume EchoFixture:{"action":"audio.setVolume","args":{"percent":30}}');
+  await reopen('set volume EchoFixture:{"action":"audio.setVolume","args":{"percent":30}}');
   await until(() => palette._items[0]?.type === 'action' && palette._items[0].suggested === true);
   report('model-suggested-action-validated',
     palette._items[0].plan?.steps?.[0]?.id === 'audio.setVolume');
-  await reopen('volume EchoFixture:{"action":"system.runCommand","args":{}}');
+  await reopen('set volume EchoFixture:{"action":"system.runCommand","args":{}}');
   await until(() => palette._items[0]?.type === 'ask');
   report('invalid-model-tool-call-falls-back-to-ask', true);
+
+  // A model-proposed state change can never bypass the confirmation policy,
+  // even when the deterministic policy would execute it immediately.
+  await reopen('set volume EchoFixture:{"action":"wifi.setState","args":{"enabled":false}}');
+  await until(() => palette._items[0]?.type === 'action' && palette._items[0].suggested === true);
+  report('model-state-change-plans-confirmation',
+    palette._items[0].plan?.steps?.[0]?.id === 'wifi.setState' &&
+    palette._items[0].plan?.needsConfirmation === true);
+  palette._activateItem(0);
+  report('model-state-change-confirmation-view', palette._mode === 'action-confirm');
+  palette._writingControls.get_first_child().emit('clicked', 1);
+  report('model-state-change-cancel-closes', !palette._isOpen);
+
+  // Noun-phrase capability mentions must never produce a system action row
+  // and never reach the routing model (a fuzzy app row is acceptable — it is
+  // just a launcher result, nothing executes).
+  await reopen('bluetooth technology');
+  await pause(600);
+  report('noun-phrase-not-model-routed',
+    !palette._items.some(item => item.type === 'action' || item.type === 'action-searching'));
+
+  // Multi-step with the "tell me" info phrasing parses as a plan.
+  await reopen('open downloads and tell me how much disk space i have');
+  await until(() => palette._items[0]?.type === 'action');
+  report('multi-step-tell-me-disk', palette._items[0].name.includes('+') &&
+    palette._items[0].plan?.steps?.length === 2);
+
+  // Developer diagnostics: the hidden command shows recent traces and Reset
+  // clears both the Shell records and the service mirror.
+  await reopen('gdi diagnostics');
+  await until(() => palette._mode === 'action-result');
+  report('diagnostics-view-shown', bodyText().includes('Invocations:') &&
+    bodyText().includes('disk space'));
+  const resetButton = palette._writingControls.get_children()
+    .find(button => button.label === 'Reset');
+  report('diagnostics-reset-button', Boolean(resetButton));
+  resetButton?.emit('clicked', 1);
+  await pause(80);
+  report('diagnostics-reset-clears', bodyText().includes('No action traces recorded yet'));
   palette.close(); await pause(180);
 }
 

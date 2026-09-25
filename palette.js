@@ -38,6 +38,7 @@ import {
   recordActionUse,
   releaseContext,
   replaceSelection,
+  resetActionDiagnostics,
   transform,
   streamTransform,
   undoReplacement,
@@ -48,7 +49,13 @@ import { addDiff, addMarkdown, StreamRenderer } from './src/intelligence/Respons
 import { MORE_ACTIONS, TONE_ACTIONS, writingMenuFor } from './src/intelligence/WritingMenu.js';
 import { parseActionPlan, parseFileQuery } from './src/actions/parser.js';
 import {
+  beginActionTrace,
+  clearDiagnostics,
+  diagnosticsSummary,
   executePlan,
+  finishLauncherTrace,
+  finishTrace,
+  localDiagnostics,
   mayNeedModelRouting,
   prepareAction,
   preparePlan,
@@ -348,6 +355,14 @@ export class LauncherPalette {
     if (!this._isOpen)
       return;
 
+    // A dismissed confirmation is a cancelled action, never a pending one:
+    // the trace is closed here so no path (button, Escape, outside click)
+    // can leave an actionable plan behind.
+    if (this._mode === 'action-confirm' && this._pendingPlan?.trace &&
+        this._pendingPlan.trace.status === 'open')
+      finishTrace(this._pendingPlan.trace, 'cancelled', 'Confirmation dismissed');
+    this._pendingPlan = null;
+
     if (this._mode === 'writing-loading' && this._writingContext)
       cancelTransform(this._writingContext.token);
     if ((this._mode === 'writing-result' || this._mode === 'writing-error') &&
@@ -627,6 +642,10 @@ export class LauncherPalette {
       }]);
       return;
     }
+    if (/^gdi (?:action )?diagnostics$/i.test(query.trim())) {
+      this._showActionDiagnostics();
+      return;
+    }
     const webMatch = query.match(/^search\s+(.+)$/i);
     if (webMatch) {
       const term = webMatch[1].trim();
@@ -662,9 +681,13 @@ export class LauncherPalette {
     // Native desktop actions: deterministic parsing first; the routing model
     // is only consulted (below) when nothing here matches.
     if (parseActionPlan(query)) {
-      preparePlan(query).then(plan => {
-        if (!this._isOpen || generation !== this._queryGeneration)
+      const trace = beginActionTrace({query, source: 'deterministic'});
+      preparePlan(query, 'deterministic', trace).then(plan => {
+        if (!this._isOpen || generation !== this._queryGeneration) {
+          if (plan?.trace)
+            finishTrace(plan.trace, 'cancelled', 'Superseded by a newer query');
           return;
+        }
         if (plan) {
           this._setResults([{
             type: 'action',
@@ -677,7 +700,9 @@ export class LauncherPalette {
         // Validation vetoed the plan (e.g. an untrusted URL form): fall back
         // to the plain launcher interpretation instead of showing nothing.
         this._searchLauncher(query, generation);
-      }).catch(() => {
+      }).catch(error => {
+        if (trace.status === 'open')
+          finishTrace(trace, 'failed', `Plan preparation failed: ${error?.message ?? error}`);
         if (this._isOpen && generation === this._queryGeneration)
           this._searchLauncher(query, generation);
       });
@@ -784,22 +809,33 @@ export class LauncherPalette {
   _startActionSuggestion(query, generation) {
     // Bounded model use: one routing-model request per query, guarded by the
     // search generation. Deterministic actions never enter this path.
+    const trace = beginActionTrace({query, source: 'model'});
     this._setResults([{
       type: 'action-searching',
       name: _('Looking for a matching action…'),
       icon: this._intelligenceIcon,
     }]);
-    suggestActionFromModel(query, this._settings).then(suggested => {
-      if (!this._isOpen || generation !== this._queryGeneration)
+    suggestActionFromModel(query, this._settings, trace).then(suggested => {
+      if (!this._isOpen || generation !== this._queryGeneration) {
+        if (trace.status === 'open')
+          finishTrace(trace, 'cancelled', 'Superseded by a newer query');
         return;
+      }
       if (!suggested) {
+        if (trace.status === 'open')
+          finishTrace(trace, 'complete', 'No matching action — Ask Intelligence shown');
         this._setResults([this._askRow(query)]);
         return;
       }
-      prepareAction(suggested.id, suggested.args).then(plan => {
-        if (!this._isOpen || generation !== this._queryGeneration)
+      prepareAction(suggested.id, suggested.args, 'model', trace).then(plan => {
+        if (!this._isOpen || generation !== this._queryGeneration) {
+          if (plan?.trace)
+            finishTrace(plan.trace, 'cancelled', 'Superseded by a newer query');
           return;
+        }
         if (!plan) {
+          if (trace.status === 'open')
+            finishTrace(trace, 'invalid-tool-call', 'Rejected by the registry');
           this._setResults([this._askRow(query)]);
           return;
         }
@@ -810,11 +846,15 @@ export class LauncherPalette {
           suggested: true,
           icon: this._actionIcon(plan.steps[0].action.icon),
         }]);
-      }).catch(() => {
+      }).catch(error => {
+        if (trace.status === 'open')
+          finishTrace(trace, 'failed', `Suggested plan failed: ${error?.message ?? error}`);
         if (this._isOpen && generation === this._queryGeneration)
           this._setResults([this._askRow(query)]);
       });
-    }).catch(() => {
+    }).catch(error => {
+      if (trace.status === 'open')
+        finishTrace(trace, 'failed', `Routing model unavailable: ${error?.message ?? error}`);
       if (this._isOpen && generation === this._queryGeneration)
         this._setResults([this._askRow(query)]);
     });
@@ -882,13 +922,14 @@ export class LauncherPalette {
   }
 
   _executeActionPlan(plan) {
+    const trace = plan.trace;
     this._mode = 'action-running';
     this._pendingPlan = null;
     this._showActionView({heading: _('Working…'), lines: [], buttons: []});
-    executePlan(plan).then(results => this._renderActionResult(results));
+    executePlan(plan).then(results => this._renderActionResult(results, trace));
   }
 
-  _renderActionResult(results) {
+  _renderActionResult(results, trace = null) {
     const lines = [];
     let heading = '';
     const single = results.length === 1;
@@ -902,6 +943,14 @@ export class LauncherPalette {
       if (!single && results.some(result => !result.ok))
         heading = _('Plan stopped at the first failure');
     }
+    const allOk = results.every(result => result.ok);
+    if (trace && trace.status === 'open')
+      finishTrace(trace, allOk ? 'complete' : 'failed', `${heading} — ${lines.join(' | ')}`);
+    // The palette may have closed while the action ran: the trace above is
+    // still recorded, but no result view may be rendered into a closed or
+    // reused palette.
+    if (!this._isOpen || this._mode === 'action-confirm')
+      return;
     const buttons = [];
     const copyable = single && step.action.risk === 'read-only' && results[0].ok;
     if (copyable)
@@ -909,6 +958,41 @@ export class LauncherPalette {
     buttons.push([_('Done'), () => this.close(), true]);
     this._mode = 'action-result';
     this._showActionView({heading, lines, buttons});
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Developer action diagnostics (hidden command: "gdi diagnostics"). */
+  /* ---------------------------------------------------------------- */
+
+  _showActionDiagnostics() {
+    this._mode = 'action-result';
+    const summary = diagnosticsSummary();
+    const traces = localDiagnostics().slice().reverse();
+    const lines = [
+      `Invocations: ${summary.total} · complete ${summary.complete} · failed ${summary.failed} · cancelled ${summary.cancelled} · invalid model calls ${summary.invalidToolCalls} · model-routed ${summary.modelRouted}`,
+      '',
+      ...traces.flatMap(trace => {
+        const actions = (trace.steps ?? []).map(step =>
+          `${step.action}(${Object.entries(step.args ?? {}).map(([k, v]) => `${k}=${v}`).join(' ')}) ${step.status}${step.verified === false ? ' UNVERIFIED' : ''} ${step.latencyMs}ms`).join(' + ') || (trace.modelSuggestion ?? '-');
+        const line = `${trace.time.slice(11, 19)} [${trace.source}] “${trace.query}” → ${actions} · ${trace.status}${trace.ui ? ` · ${trace.ui}` : ''}${trace.totalMs !== undefined ? ` · ${trace.totalMs}ms` : ''}`;
+        return line.length > 240 ? [line.slice(0, 240), '  …'] : [line];
+      }).slice(0, 40),
+    ];
+    if (!traces.length)
+      lines.push('No action traces recorded yet in this session.');
+    this._showActionView({heading: 'Action Diagnostics', lines, buttons: [
+      [_('Copy'), () => {
+        St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD,
+          lines.join('\n'));
+        this._showActionDiagnostics();
+      }, true],
+      [_('Reset'), () => {
+        clearDiagnostics();
+        resetActionDiagnostics();
+        this._showActionDiagnostics();
+      }, true],
+      [_('Close'), () => this.close(), true],
+    ]});
   }
 
   _copyActionText(text) {
@@ -2180,18 +2264,72 @@ export class LauncherPalette {
     const context = global.create_app_launch_context(0, -1);
     try {
       if (item.type === 'app') {
+        const trace = beginActionTrace({query: item.name, source: 'launcher-app'});
+        const started = GLib.get_monotonic_time();
         recordActionUse('app.open', item.name);
-        if (!item.appInfo.launch([], context))
+        let launched = false;
+        let failure = '';
+        try {
+          launched = item.appInfo.launch([], context);
+          if (!launched)
+            failure = `${item.name} could not be launched`;
+        } catch (error) {
+          failure = error.message;
+        }
+        finishLauncherTrace(trace, {
+          action: 'app.open', target: item.name,
+          status: launched ? 'complete' : 'failed',
+          message: launched ? `${item.name} launched` : failure,
+          latencyMs: Math.round((GLib.get_monotonic_time() - started) / 1000),
+        });
+        if (!launched)
           Main.notify(_('Could not launch %s').format(item.name));
       } else if (item.type === 'file') {
-        Gio.AppInfo.launch_default_for_uri(item.file.get_uri(), context);
+        const trace = beginActionTrace({query: item.name, source: 'launcher-file'});
+        const started = GLib.get_monotonic_time();
+        try {
+          Gio.AppInfo.launch_default_for_uri(item.file.get_uri(), context);
+          finishLauncherTrace(trace, {
+            action: 'file.open', target: item.name, status: 'complete',
+            message: `${item.name} opened`,
+            latencyMs: Math.round((GLib.get_monotonic_time() - started) / 1000),
+          });
+        } catch (error) {
+          finishLauncherTrace(trace, {
+            action: 'file.open', target: item.name, status: 'failed',
+            message: error.message,
+            latencyMs: Math.round((GLib.get_monotonic_time() - started) / 1000),
+          });
+          Main.notify(_('Could not open %s').format(item.name));
+        }
       } else if (item.type === 'web') {
+        const trace = beginActionTrace({query: item.query, source: 'launcher-web'});
+        const started = GLib.get_monotonic_time();
         const encoded = GLib.uri_escape_string(item.query, null, true);
-        Gio.AppInfo.launch_default_for_uri(
-          `https://www.google.com/search?q=${encoded}`, context);
+        try {
+          Gio.AppInfo.launch_default_for_uri(
+            `https://www.google.com/search?q=${encoded}`, context);
+          finishLauncherTrace(trace, {
+            action: 'web.search', target: item.query.slice(0, 100), status: 'complete',
+            message: 'Web search opened',
+            latencyMs: Math.round((GLib.get_monotonic_time() - started) / 1000),
+          });
+        } catch (error) {
+          finishLauncherTrace(trace, {
+            action: 'web.search', target: item.query.slice(0, 100), status: 'failed',
+            message: error.message,
+            latencyMs: Math.round((GLib.get_monotonic_time() - started) / 1000),
+          });
+          Main.notify(_('Could not open the web search'));
+        }
       } else if (item.type === 'calc') {
         St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, item.value);
         Main.notify(_('Copied result'), item.value);
+        const trace = beginActionTrace({query: item.name, source: 'launcher-calc'});
+        finishLauncherTrace(trace, {
+          action: 'calc.copy', target: item.value.slice(0, 100), status: 'complete',
+          message: `Copied ${item.value}`, latencyMs: 0,
+        });
       }
     } catch (error) {
       console.error(`GDI action failed: ${error.message}`);

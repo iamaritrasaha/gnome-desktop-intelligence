@@ -1,8 +1,105 @@
 # Current state
 
-Updated: 2026-09-25 (Phase 5 — Writing Intelligence, predictive writing, Ask UX/history)
+Updated: 2026-09-25 (live reliability audit — actions verified on the real host)
 
-## Phase 5 — implemented and validated
+## Live reliability audit — actions verified on the real host (2026-09-25)
+
+Triggered by the user's report that passing automated tests did not prove the
+Phase 4/5 tools work in normal use. No new features were added. The pass
+audited the live installation, built an end-to-end action trace, repaired
+every defect found by real-host testing, and verified every Phase 4 action
+against the actual machine — `tools/verify-live-actions.py`
+(`--read-only` / `--reversible`) is the permanent real-host tool.
+
+### Installation audit (before any code change)
+
+Installed extension byte-matched the source tree (all JS, schemas, service
+files compared with `cmp`), the D-Bus service file pointed at the installed
+service path, exactly one `org.gnome.DesktopIntelligence1` instance ran
+(D-Bus activated, "GDI session service ready" in the journal), live GSettings
+matched the expected configuration (shortcut `<Alt>Control_L`, passive
+writing on, learning on, `model-intent-routing` =
+`LiquidAI/lfm2.5-1.2b-instruct:q4_k_m`), the extension reported ACTIVE on
+GNOME Shell 46.0, and the journal contained no GDI JS errors (the only
+`this.actor is null` error is GNOME Shell's own windowManager code). The
+12:58 login had activated the Phase 4 install as recorded.
+
+### Real defects found by live-host testing (all fixed, all regression-covered)
+
+| # | Defect | Root cause | Fix |
+| --- | --- | --- | --- |
+| 1 | `volume down`, `quieter`, `dimmer` never executed — they fell back to Ask Intelligence | `audio.adjustVolume`/`display.adjustBrightness` typed `step` as the 0–100 `percent`, so `validateArgs` vetoed `{step: -10}`; parser tests never ran validation over parsed values | Dedicated `step` arg type (−100…100, non-zero) in `registry.js`; nested + node regression coverage incl. validation |
+| 2 | Routing model answered `enabled: "off"`, `profile: "Power Saver"` — valid intents rejected as invalid tool calls | Strict boolean/enum types rejected the model's word forms | Bounded representation repairs at the registry boundary (onoff words; profile/scheme human labels + aliases); out-of-registry values still rejected |
+| 3 | `bluetooth technology` reached the routing model and could surface a Bluetooth action row | The keyword gate had no request-shape requirement | `mayNeedModelRouting` (pure parser export) requires an action verb or state question; capability noun phrases go to Ask |
+| 4 | A model-proposed state change could execute immediately (e.g. Bluetooth off with no connected devices) | Model-sourced steps used the deterministic confirmation policy | Model-sourced STATE_CHANGE always plans a confirmation — the model can raise the bar, never lower it (nested probe) |
+| 5 | Mutating actions reported success from a D-Bus return value without checking the state | No read-back | Every mutation verifies: GVC sink re-read (±2%, bounded retry), NM `WirelessEnabled`, BlueZ `Powered`, `ActiveProfile`, gsd `Brightness`, GSettings re-read; disagreement → `VerificationError` → visible failure |
+| 6 | Results could render into a closed palette; an executed-while-closed result was invisible | No `_isOpen` guard in `_renderActionResult` | Trace records the outcome; UI renders only while open; closing a confirmation always cancels its plan |
+| 7 | Launcher file/web launch failures only hit `console.error` (silent for the user) | Fire-and-forget launches | Failures notify; all launcher activations (app/file/web/calc) are now traced |
+| 8 | App/file/web/calc launches left no diagnostics; `localDiagnostics()` was dead code | No end-to-end trace existed | One trace per invocation (raw/normalized text, routing source, intent, validated args, risk, confirmation, backend, per-step result+verification+latency, model reply, UI result, total latency), RAM-only, mirrored to `ActionStats`; hidden `gdi diagnostics` palette view with Copy/Reset (`ResetActionStats` service method) |
+
+Live `RouteAction` probes against the running service with the real routing
+model also confirmed the fail-closed behavior: a hallucinated id ("save some
+battery" → action `save`) is rejected and falls back to Ask Intelligence with
+the invalid-tool-call counter incremented. The tiny 1.2B model's semantic
+accuracy (one wrong-direction suggestion) is a model-quality limit;
+`model-intent-routing` remains a user setting.
+
+### Real-host verification table (2026-09-25, `build/validation/verify-live-*.json`)
+
+Read-only checks ran on the live host; reversible checks performed the
+mutation, verified the read-back, and restored + re-verified the original
+state. Wi-Fi and text scaling toggles were intentionally not executed on the
+live desktop (session may depend on Wi-Fi; text scaling rescales the whole
+desktop) — both are covered in nested sessions.
+
+| Action | Parsed correctly | Executor called | Real state verified | Result |
+| --- | --- | --- | --- | --- |
+| Volume set/step | yes (`volume 30`, `set the volume to 40`, `volume 30 percent`, `make sound 30`) | yes (GVC/PipeWire) | yes — read-back 30%/60% on the live sink | PASS |
+| Mute/unmute | yes (`mute`, `unmute`, `sound off/on`) | yes (GVC/PipeWire) | yes — muted state read back | PASS |
+| Bluetooth | yes (`turn/switch/disable bluetooth off`, `is bluetooth on`) | yes (BlueZ `Powered`) | yes — powered read back; off→on restored (0 connected devices) | PASS |
+| Wi-Fi | yes (`is wifi on`, `turn wifi off` + confirmation) | yes (NetworkManager) | read-only on live host; physical toggle intentionally skipped (session depends on it) | PASS (read-only) |
+| Power profile | yes (`switch to/use power saver`, `performance mode`) | yes (power-profiles-daemon) | yes — `ActiveProfile` read back; performance restored | PASS |
+| Dark mode | yes (`dark mode`, `turn on dark mode`, `light mode`) | yes (GSettings) | yes — `color-scheme` re-read; prefer-dark restored | PASS |
+| Night Light | yes | yes (GSettings) | yes — re-read and restored | PASS |
+| Brightness | yes | yes (gsd `Screen.Brightness`) | n/a — no backlight on this machine; reports unavailable correctly | PASS (graceful) |
+| Disk | yes (`how much disk space do i have`, `tell me … i have`) | yes (GIO statvfs) | yes — real 234 GB volume numbers | PASS |
+| Memory | yes (`memory usage`, `how much memory am i using`) | yes (/proc/meminfo) | yes — real 16.7 GB totals | PASS |
+| IP / network | yes (`show my ip`, `what is my ip`, `network status`) | yes (NM addresses) | yes — live connectivity/addresses | PASS |
+| Apps | yes (`open firefox` → app row) | yes (GIO launch) | yes — live learning shows real launches; failures now notify | PASS |
+| Folders | yes (`open downloads`, `open documents`) | yes (GIO launch) | yes — `directory.open` traced; ranking live | PASS |
+| Settings panels | yes (`open display settings`) | yes (whitelisted panels; `--list` verified 25/25) | yes — panel whitelist matches host | PASS |
+| Multi-step plans | yes (`turn bluetooth off and switch to power saver`; `open downloads and tell me how much disk space i have`) | nested probes | stop-at-first-failure, ≤3 steps, plan view | PASS |
+| Confirmation UX | Enter focuses Cancel; Esc/outside click cancels; stale plan dropped on close | nested probes | model-sourced state changes confirmed too | PASS |
+| Model routing fallback | deterministic-first; noun phrases never routed | yes (live RouteAction) | invalid ids/args rejected + counted; Ask fallback | PASS |
+
+### Validation performed (2026-09-25, audit pass)
+
+| Check | Result |
+| --- | --- |
+| `make lint pack` | PASS (strict schemas, JS/Python syntax, packaging regressions) |
+| `make test-refinement` (43 suite results incl. `test-actions.mjs`, `test-action-service.py`, prediction/history/writing/streaming/safety/provider) | PASS |
+| `tools/validate-nested-wayland.sh` (fresh pack) | PASS — **132 GDI_TEST probes true, zero failures**: all prior launcher/Ask/writing/history/passive probes plus new `volume down` regression, model-sourced confirmation (`model-state-change-*`), noun-phrase gate (`noun-phrase-not-model-routed`), `multi-step-tell-me-disk`, and the `gdi diagnostics` view (`diagnostics-view-shown`/`reset-button`/`reset-clears`) |
+| `tools/try-phase3.sh --check` | PASS — passive/prediction regression unchanged (see log) |
+| `tools/verify-live-actions.py --read-only` | PASS — 10/10 real-host backend checks (1 intentional skip: brightness hardware absent) |
+| `tools/verify-live-actions.py --reversible` | PASS — 25 passed / 0 failed: volume 30→60 verified, mute cycle verified, power profile, dark mode, Night Light, Bluetooth off→on all read back and restored; Wi-Fi/text-scaling skips intentional |
+| Live `RouteAction` (running service, real model) | Fail-closed verified live; bounded coercion repairs accepted |
+| Live diagnostics mirror | `RecordActionDiagnostic`→`ActionStats` verified on the running service |
+| Installed build | Reinstalled with `make install` (backup `~/.local/state/gdi/install-backups/pre-audit-20260925-134550/`); installed files byte-match source; user settings preserved; extension ACTIVE. The running session keeps its imported modules and the running service until the next normal login (GNOME 46 module cache; the only service change is additive and backward compatible) |
+
+### Exact next task
+
+Physical everyday testing of the audited build after the next normal login
+(installed 2026-09-25; `make lint install`). Verify in real use: `volume 30`,
+`volume down` (previously broken), `mute`/`unmute`, `turn bluetooth off`
+(confirmation appears when devices are connected), `open downloads`,
+`open display settings`, `show my ip`, `switch to power saver`, dark/light
+mode, a two-step request, and `gdi diagnostics` after running them. Report
+any silent failure — none is expected; every mutation now verifies its own
+state before showing success. Stop at this boundary; no new features.
+
+---
+
+## Phase 5 — implemented and validated (historical)
 
 This pass added Writing Intelligence's third mode (**Continue**), redesigned
 the Writing Tools presentation, overhauled the Ask Intelligence surface and

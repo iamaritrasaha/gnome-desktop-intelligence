@@ -130,6 +130,7 @@ INTROSPECTION_XML = """
     <method name="ActionStats"><arg type="s" direction="out"/></method>
     <method name="RecordActionDiagnostic"><arg type="s" direction="in"/></method>
     <method name="RecordActionUse"><arg type="s" direction="in"/><arg type="s" direction="in"/></method>
+    <method name="ResetActionStats"/>
     <method name="RouteAction">
       <arg type="s" name="question" direction="in"/>
       <arg type="s" name="registry" direction="in"/>
@@ -370,6 +371,9 @@ class GdiService(SelectionContext):
                         self._learning.record(args[0][:64], 'accepted', args[1][:128])
                     except Exception as error:
                         print(f"GDI learning store unavailable: {error}", flush=True)
+                invocation.return_value(GLib.Variant('()', ()))
+            elif method == 'ResetActionStats':
+                self._action_stats[:] = []
                 invocation.return_value(GLib.Variant('()', ()))
             elif method == 'RouteAction':
                 question, registry_json = args

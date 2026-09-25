@@ -64,16 +64,58 @@ function factor(value) {
   return Number.isFinite(n) && n >= 0.5 && n <= 3 ? Math.round(n * 100) / 100 : null;
 }
 
-const onoff = value => (typeof value === 'boolean' ? value : null);
+const onoff = value => {
+  if (typeof value === 'boolean')
+    return value;
+  // The routing model frequently answers with the words "on"/"off"; this
+  // bounded coercion repairs the representation, never the decision.
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['on', 'true'].includes(normalized))
+      return true;
+    if (['off', 'false'].includes(normalized))
+      return false;
+  }
+  return null;
+};
+
+/* Relative changes ("volume down" → -10) may be negative, unlike percent. */
+const step = value => {
+  const n = Math.round(Number(value));
+  return Number.isFinite(n) && n >= -100 && n <= 100 && n !== 0 ? n : null;
+};
 
 const oneOf = list => value => (list.includes(value) ? value : null);
+
+/*
+ * The routing model often answers with human-label forms ("Power Saver",
+ * "dark"); these bounded canonicalizations repair the representation only —
+ * an out-of-registry value is still rejected.
+ */
+const canonicalEnum = list => value => {
+  let normalized = String(value ?? '').trim().toLowerCase()
+    .replace(/\s+(mode|profile|theme|light)$/, '')
+    .replace(/[\s_]+/g, '-');
+  if (list.includes(normalized))
+    return normalized;
+  const aliases = {
+    'power-saver': ['saver', 'battery-saver', 'eco'],
+    'prefer-dark': ['dark', 'dark-mode'],
+    default: ['light', 'light-mode'],
+  };
+  for (const target of list)
+    if ((aliases[target] ?? []).includes(normalized))
+      return target;
+  return null;
+};
 
 const ARG_TYPES = {
   percent,
   factor,
+  step,
   onoff,
-  profile: oneOf(POWER_PROFILES),
-  scheme: oneOf(SCHEMES),
+  profile: canonicalEnum(POWER_PROFILES),
+  scheme: canonicalEnum(SCHEMES),
   panel: value => {
     const name = String(value ?? '').trim().toLowerCase();
     const resolved = PANEL_ALIASES[name] ?? name;
@@ -115,6 +157,7 @@ const ACTIONS = {
     backend: 'gvc',
     icon: 'audio-volume-high-symbolic',
     args: { percent: 'percent' },
+    description: 'Set the output volume to an explicit percentage',
     title: a => `Set volume to ${a.percent}%`,
     result: a => `Volume set to ${a.percent}%`,
   },
@@ -122,7 +165,10 @@ const ACTIONS = {
     risk: RISK.STATE_CHANGE,
     backend: 'gvc',
     icon: 'audio-volume-high-symbolic',
-    args: { step: 'percent' },
+    args: { step: 'step' },
+    // The description is what the routing model sees: direction must be
+    // unambiguous so "quieter" cannot become a 100% set.
+    description: 'Raise or lower the output volume relatively; negative step lowers, positive raises',
     title: a => `${a.step >= 0 ? 'Raise' : 'Lower'} volume by ${Math.abs(a.step)}%`,
     result: a => `Volume changed by ${a.step}%`,
   },
@@ -254,6 +300,7 @@ const ACTIONS = {
     backend: 'session-dbus',
     icon: 'display-brightness-symbolic',
     args: { percent: 'percent' },
+    description: 'Set the screen brightness to an explicit percentage',
     title: a => `Set brightness to ${a.percent}%`,
     result: a => `Brightness set to ${a.percent}%`,
   },
@@ -261,7 +308,8 @@ const ACTIONS = {
     risk: RISK.STATE_CHANGE,
     backend: 'session-dbus',
     icon: 'display-brightness-symbolic',
-    args: { step: 'percent' },
+    args: { step: 'step' },
+    description: 'Raise or lower the screen brightness relatively; negative step dims, positive brightens',
     title: a => `${a.step >= 0 ? 'Raise' : 'Lower'} brightness by ${Math.abs(a.step)}%`,
     result: a => `Brightness changed by ${a.step}%`,
   },
@@ -451,6 +499,7 @@ export function describeModelRoutable() {
 function sampleArgs(schema) {
   const samples = {
     percent: { percent: 50, step: 10 },
+    step: { step: 10 },
     factor: { factor: 1.25 },
     onoff: { enabled: false, muted: true },
     profile: { profile: 'power-saver' },

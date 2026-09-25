@@ -463,11 +463,18 @@ GNOME Shell (GJS)                          Session service (Python/PyGObject)
 stable id (`audio.setVolume`, `bluetooth.setState`, `system.diskUsage`, …), a
 risk class (READ_ONLY, LOW_RISK, STATE_CHANGE; SENSITIVE/DESTRUCTIVE exist in
 the policy but no Phase 4 action uses them), a backend tag, typed argument
-schemas (`percent`, `factor`, `onoff`, `profile`, `scheme`, `panel`, `dirname`,
-`url`, `text`, `app`), row/confirmation strings, and an availability backend.
-`validateArgs` is the trust boundary: unknown ids, unknown keys and
+schemas (`percent`, `step`, `factor`, `onoff`, `profile`, `scheme`, `panel`,
+`dirname`, `url`, `text`, `app`), row/confirmation strings, and an availability
+backend. `validateArgs` is the trust boundary: unknown ids, unknown keys and
 out-of-type/out-of-range values are rejected, so neither the parser nor the
-routing model can construct an unregistered or mistyped call.
+routing model can construct an unregistered or mistyped call. Relative-change
+arguments use a dedicated `step` type (−100…100, non-zero) — the original
+single `percent` type rejected negative steps, which silently diverted
+`volume down`/`quieter`/`dimmer` to Ask Intelligence (found by live-host
+testing and covered by regression). Two bounded representation repairs exist
+at the same boundary for routing-model output only: `onoff` accepts the words
+"on"/"off"/"true"/"false", and `profile`/`scheme` accept human-label forms
+("Power Saver", "dark mode"); out-of-registry values are still rejected.
 
 Backends are native only: GVC (the mixer library GNOME Shell itself uses) for
 volume/mute; GSettings for color scheme, Night Light and text scaling;
@@ -484,17 +491,25 @@ battery facts. There are no shell commands anywhere in the engine.
 
 `src/actions/parser.js` is a bounded, inspectable rule table (checked by
 `tools/test-actions.mjs`) that normalizes phrasings — `volume 30`,
-`turn bluetooth off`, `switch off bluetooth`, `disable wifi`, `use power
-saver`, `turn on dark mode`, `open display settings`, `open downloads`,
-`show my ip`, `find resume pdf`, `find pdfs modified today` — onto registry
-actions. Launcher precedence stays: `search` prefix (web), calculator, `ask`
-prefix, then actions, then apps/files, then Ask Intelligence. Multi-step
-queries split on `and`/`then`; every part must parse, at most three steps, no
-recursion. `find <terms> <ext>` and a trailing `modified today` narrow the
-existing bounded file search (extension and mtime filters in FileSearch.js,
-never a wider scan and never file contents).
+`turn bluetooth off`, `switch off bluetooth`, `disable wifi`,
+`switch to power saver`, `turn on dark mode`, `open display settings`,
+`open downloads`, `show my ip`, `how much disk space do i have`,
+`tell me how much disk space i have`, `text scaling 1.25`,
+`find resume pdf`, `find pdfs modified today` — onto registry actions.
+Launcher precedence stays: `search` prefix (web), calculator, `ask` prefix,
+then actions, then apps/files, then Ask Intelligence. Multi-step queries split
+on `and`/`then`; every part must parse, at most three steps, no recursion.
+`find <terms> <ext>` and a trailing `modified today` narrow the existing
+bounded file search (extension and mtime filters in FileSearch.js, never a
+wider scan and never file contents).
 
-### Execution, confirmation and results
+`mayNeedModelRouting` is a pure parser export: the query must name a desktop
+capability (bounded keyword list) *and* have request shape — an action verb or
+a state question. Capability noun phrases ("bluetooth technology", "dark
+matter", "the history of wifi") go to Ask Intelligence and can never reach the
+routing model.
+
+### Execution, confirmation, verification and results
 
 `src/actions/engine.js` runs inside the Shell process but is fully
 asynchronous: D-Bus property/method calls with timeouts, a lazily opened GVC
@@ -503,25 +518,67 @@ and attaches confirmation decisions; the confirmation policy is a pure
 registry function plus machine facts — immediate for READ_ONLY, launches,
 volume/mute, color scheme, Night Light, brightness and power profile; explicit
 compact confirmation for Wi-Fi off, text-scaling changes, and Bluetooth off
-only when connected devices would be affected. Personalization never
-participates in this decision. Results render in the palette's native surface:
-“✓ …” for executed changes, the structured answer for info actions (Copy
-available), per-step ✓/✗ lines for plans (stopping at the first failure), and a
-concise unavailable/service-down message otherwise. A failing action can never
-crash the Shell: every backend error is mapped to a readable message.
+only when connected devices would be affected. A state-changing action
+proposed by the routing model always plans a confirmation, even when the
+deterministic policy would execute immediately: the model can raise the
+confirmation bar, never lower it. Personalization never participates in this
+decision.
+
+Every mutating action verifies its own effect before reporting success: the
+audio implementations re-read the GVC sink after the daemon applies the change
+(bounded retry, ±2% tolerance), Wi-Fi and Bluetooth re-read
+NetworkManager/BlueZ state, the power profile re-reads `ActiveProfile`,
+brightness re-reads the gsd property, and the GSettings-backed actions re-read
+the key after `Gio.Settings.sync()`. A disagreeing read-back raises a
+`VerificationError` and the action reports a visible failure instead of a
+false success.
+
+Results render in the palette's native surface: "✓ …" for executed changes,
+the structured answer for info actions (Copy available), per-step ✓/✗ lines
+for plans (stopping at the first failure), and a concise
+unavailable/service-down message otherwise. A failing action can never crash
+the Shell: every backend error is mapped to a readable message. Closing the
+palette during a confirmation always cancels the pending plan (trace closed as
+cancelled, `_pendingPlan` dropped), and a result arriving after close records
+its outcome without rendering into a closed palette.
+
+### End-to-end action traces and developer diagnostics
+
+One user invocation produces one bounded RAM-only trace (`engine.js`
+`beginActionTrace`/`finishTrace`): raw launcher text, normalized text,
+routing source (deterministic, model, launcher-app/file/web/calc),
+deterministic match, proposed steps, chosen action, validated arguments, risk
+class, confirmation decision, backend tag, per-step result, verification and
+latency, the routing model's reply and latency, the final UI result and total
+latency. Traces are capped at 50 records and mirrored to the service's
+existing RAM-only `RecordActionDiagnostic` (records >4096 bytes are dropped
+service-side) with `NO_AUTO_START`, so executing an action never spawns the
+intelligence service. Launcher activations (app/file/web/calc) are traced as
+well, and their launch failures notify the user instead of only logging. The
+hidden palette command `gdi diagnostics` (never advertised in normal UI)
+renders the recent traces with Copy and Reset buttons; Reset also clears the
+service mirror via the new `ResetActionStats` method. Traces contain no
+writing-tool text and no secrets; launcher text is truncated to 200
+characters.
 
 ### Model fallback and diagnostics
 
-Only when deterministic parsing finds nothing and the query plausibly names a
-desktop capability (bounded keyword gate) does the palette call the service's
-`RouteAction(question, registry)`. The service runs the configured small
-routing model (`model-intent-routing`) with a structured-output schema and a
-compact registry description, returns normalized JSON (`normalize_intent_response`),
-and imposes a 200-character question cap, a 16 KiB registry cap and a
-concurrency limit of 2. The Shell re-validates the reply against the registry
-(`prepareAction`); unknown actions or invalid arguments are recorded as invalid
-tool calls and fall back to the Ask Intelligence row. Suggested rows are
-marked “Suggested”; launch/file/web/url actions are never model-routable.
+Only when deterministic parsing finds nothing and `mayNeedModelRouting` says
+the query plausibly names a desktop capability as a request does the palette
+call the service's `RouteAction(question, registry)`. The service runs the
+configured small routing model (`model-intent-routing`) with a
+structured-output schema and a compact registry description, returns
+normalized JSON (`normalize_intent_response`), and imposes a 200-character
+question cap, a 16 KiB registry cap and a concurrency limit of 2. The Shell
+re-validates the reply against the registry (`prepareAction`); unknown actions
+or invalid arguments are recorded as invalid tool calls (a running counter
+lives in `diagnosticsSummary` and each trace) and fall back to the Ask
+Intelligence row. Suggested rows are marked "Suggested"; launch/file/web/url
+actions are never model-routable. The model's reply text is kept in the trace
+for debugging. Measured on this host, the configured 1.2B routing model often
+produces invalid calls; the fail-closed path (rejection → Ask → counter) is
+the designed behavior and a stronger `model-intent-routing` model is a user
+setting, not code.
 
 Learning is ranking-only and gated by the existing opt-in `enable-learning`
 setting: accepted app/folder actions record labels (`app.open`, target) into

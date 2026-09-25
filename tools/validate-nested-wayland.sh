@@ -488,6 +488,14 @@ for expected in \
   'multi-step-executed=true' \
   'model-suggested-action-validated=true' \
   'invalid-model-tool-call-falls-back-to-ask=true' \
+  'model-state-change-plans-confirmation=true' \
+  'model-state-change-confirmation-view=true' \
+  'model-state-change-cancel-closes=true' \
+  'noun-phrase-not-model-routed=true' \
+  'multi-step-tell-me-disk=true' \
+  'diagnostics-view-shown=true' \
+  'diagnostics-reset-button=true' \
+  'diagnostics-reset-clears=true' \
   'probe-complete=true'; do
   if ! grep -Fq "GDI_TEST $expected" "$HOME/nested-shell.log"; then
     echo "Nested UI check did not pass: $expected" >&2

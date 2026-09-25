@@ -1,6 +1,72 @@
 # Decisions
 
 
+## 2026-09-25 — live reliability audit: verified actions, tracing and model-routing repairs
+
+The user reported that passing automated tests did not prove the Phase 4/5
+tools work in normal use and authorized a live reliability audit and repair
+pass (no new features). The live installation was audited first: the installed
+extension matched the source byte-for-byte, schemas matched, exactly one
+D-Bus-activated service instance ran from the installed path, and the journal
+showed no GDI errors — the earlier "Phase 4 activates next login" install had
+indeed activated.
+
+**Real-host testing found defects the mock/nested suites could not.** All of
+them are recorded in CURRENT_STATE's verification table with root causes:
+
+- `volume down`, `quieter`, `dimmer` parsed to `{step: -10}` but the registry
+  typed `step` as the 0–100 `percent`, so validation vetoed every negative
+  step and the palette silently fell back to Ask Intelligence. The registry
+  now has a dedicated `step` type (−100…100, non-zero). Lesson: a parse-level
+  unit test that never runs `validateArgs` over the parsed value is an
+  incomplete test; the gap survived because `test-actions.mjs` asserted only
+  the parse.
+- The live routing model (LFM2.5 1.2B) answered `enabled: "off"` (string),
+  `profile: "Power Saver"` (human label), hallucinated ids, and one
+  wrong-direction suggestion. The registry boundary now performs bounded
+  representation repairs only — `"on"/"off"/"true"/"false"` for onoff, human
+  label/alias forms for profile and scheme — while out-of-registry values are
+  still rejected and counted as invalid tool calls. Fail-closed behavior was
+  verified live; the tiny model's semantic accuracy is a model-quality limit,
+  not an architecture defect, and `model-intent-routing` stays user-fixable.
+- The routing-model keyword gate let noun phrases such as "bluetooth
+  technology" reach the model. `mayNeedModelRouting` (now a pure parser
+  export) additionally requires request shape — an action verb or a state
+  question — so capability *mentions* go to Ask Intelligence, and a
+  model-proposed STATE_CHANGE always plans a confirmation even when the
+  deterministic policy would execute immediately. The routing model can only
+  raise the confirmation bar, never lower it.
+
+**Every mutating action now verifies its own state read-back.** Volume/mute
+re-read the GVC sink after the daemon applies the change, Wi-Fi and Bluetooth
+re-read NetworkManager/BlueZ state with a bounded retry, power profile
+re-reads ActiveProfile, brightness re-reads gsd, and the GSettings-backed
+actions re-read the key. A disagreeing read-back is a visible failure
+(`VerificationError`), never a success message. The real-host verifier
+exercised every reversible mutation live with restore-verification passing.
+
+**One invocation produces one end-to-end trace.** `engine.beginActionTrace`
+records raw text, normalized text, routing source, deterministic match,
+chosen action, validated arguments, risk class, confirmation decision,
+backend, per-step result/verification/latency, the routing model's reply and
+latency, the UI result and total latency — RAM-only, bounded to 50, mirrored
+to the service's existing `RecordActionDiagnostic` (4096-byte records) with
+`NO_AUTO_START`. Plain launcher activations (app/file/web/calc) are traced
+too, and their file/web launch failures now notify instead of only logging.
+A hidden palette command (`gdi diagnostics`) renders the traces with Copy and
+Reset (which also clears the service mirror via the new `ResetActionStats`
+method); it is documented as developer-only and never shown in normal flows.
+
+**Closing a confirmation always cancels its plan.** `close()` finishes the
+pending trace as cancelled and drops `_pendingPlan`, so Escape, the Cancel
+button, an outside click or a newer query can never leave an actionable plan
+behind, and `_renderActionResult` refuses to render into a closed palette
+while still recording the outcome. Nested probes now cover the
+model-sourced confirmation, the noun-phrase gate, the "tell me" multi-step
+form and the diagnostics view; `tools/verify-live-actions.py`
+(`--read-only`/`--reversible`) is the permanent real-host regression tool.
+
+
 ## 2026-09-25 — Phase 5: Writing Intelligence, predictive writing, Ask UX and history
 
 The user authorized a single pass covering predictive writing, the Writing
