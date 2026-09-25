@@ -559,6 +559,49 @@ Opening the palette, the probe itself and all deterministic launcher work
 never start Ollama, never activate the service for model use, and never
 leave the AI-free path.
 
+## Notification Intelligence (GNOME-tray, one-shot, explicit)
+
+The Shell reads GNOME Shell's own message tray — `Main.messageTray.getSources()`,
+each `source.notifications[]` with `title`, `body`, `datetime`, `gicon` —
+synchronously, and only while the Notification Intelligence surface is open or
+a notifications command runs. There are no tray event subscriptions, no
+polling, no change listeners, no service-side tray access and no
+acknowledged writes anywhere: viewing notifications in GDI never marks them
+read. `src/intelligence/NotificationTools.js` holds the pure, node-testable
+rules: typed command parsing (`notifications`, `summarize notifications`,
+`ask notifications [question]`), the conservative secret/OTP gate (explicit
+evidence only — verification codes, passwords, OTP/2FA wording — with false
+negatives accepted by design), the bounded assessment (newest first, ≤30
+items, sensitive excluded with a count), row presentation data, the relative
+time tokens and the digest builder.
+
+The digest is the only thing an explicit summarize/ask action sends:
+`Current GNOME notifications (N from M applications, newest first)` with
+`[App] Title — body (×count)` lines, per-notification bodies clipped to 200
+characters and the whole text bounded to the 12,000-character selection
+budget, plus an honest exclusion line when sensitive notifications were
+omitted. The palette registers it through `SetNotificationsContext(text)`,
+which creates an ordinary bounded RAM context (`source: "notifications"`,
+`application: "Notifications"`, no accessible, 15-minute one-shot expiry,
+owner checks, MAX_CONTEXTS pruning) — from there the request is an ordinary
+Transform/TransformStream with the existing router slots, gates and
+streaming, and the capability snapshot reports
+`canReadSelection=true, canReplaceSelection=false`, so results are read/copy
+only. Notifications-derived interactions skip `HistoryStart` (same mechanism
+as clipboard contexts), and learning records only action/outcome labels
+under the synthetic "Notifications" application name.
+
+Per-notification actions are exactly GNOME's own: `notification.activate()`
+(the banner's open path; the palette closes first so the target receives
+real focus) and `notification.destroy(DISMISSED)`, both guarded so a
+notification that vanished while the surface is open degrades to a visible
+notice and a refreshed list instead of an error. Copy text is GDI-local on
+the displayed title/body. The list surface is a dedicated
+`notifications`/`notification-detail` palette mode; result rows carry the
+source icon, title, one-line preview and a compact relative time
+(`now`, `Nm`, `HH:MM`, `Yesterday`, `M/D`). Opening the plain launcher
+performs no notification work at all.
+
 ## Phase 4: native action registry, routing and execution
 
 ```text

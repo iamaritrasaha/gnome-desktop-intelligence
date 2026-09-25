@@ -95,6 +95,15 @@ export function setClipboardContext(text, callback) {
   call('SetClipboardContext', '(s)', [text], 4000, callback);
 }
 
+/* Notification Intelligence: the Shell reads the currently listed
+ * notifications from its own message tray and registers one bounded digest as
+ * a service-side context only when the user explicitly chooses a
+ * notifications action. The service never touches the tray and never logs or
+ * persists the digest. */
+export function setNotificationsContext(text, callback) {
+  call('SetNotificationsContext', '(s)', [text], 4000, callback);
+}
+
 export function transform(request, callback) {
   call('Transform', '(sssssssssssiii)', [
     request.token,

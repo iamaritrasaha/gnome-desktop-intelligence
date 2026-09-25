@@ -178,6 +178,10 @@
 .gdi-clipboard-chips { spacing: 6px; }
 .gdi-clipboard-dismiss { min-height: 24px; min-width: 24px; padding: 0; border-radius: 6px; opacity: .68; }
 
+/* Notification Intelligence: the compact list reuses the result rows; the
+ * detail view shows the notification's own text. GNOME supplies all colors. */
+.gdi-notification-title { font-weight: 700; }
+
 /* Ask Intelligence: subdued question line and processing animation. */
 .gdi-ask-question { font-size: .84em; opacity: .68; }
 .gdi-processing { spacing: 6px; padding: 4px 0; opacity: .85; }

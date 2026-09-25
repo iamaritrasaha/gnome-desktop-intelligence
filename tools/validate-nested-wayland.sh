@@ -78,7 +78,7 @@ import sys
 path = Path(sys.argv[1])
 marker = "    this._updateShortcut();\n  }\n\n  disable()"
 source = path.read_text()
-source = source.replace("import Gio from 'gi://Gio';", "import Gio from 'gi://Gio';\nimport GLib from 'gi://GLib';\nimport {validateGeometry} from './geometry-regression.js';\nimport {validateIntelligence, validateClipboard, validateActions, validateStress} from './intelligence-regression.js';\nimport {validatePerf} from './perf-regression.js';\nimport {validatePointer} from './pointer-regression.js';")
+source = source.replace("import Gio from 'gi://Gio';", "import Gio from 'gi://Gio';\nimport GLib from 'gi://GLib';\nimport {validateGeometry} from './geometry-regression.js';\nimport {validateIntelligence, validateClipboard, validateNotifications, validateActions, validateStress} from './intelligence-regression.js';\nimport {validatePerf} from './perf-regression.js';\nimport {validatePointer} from './pointer-regression.js';")
 probe = r'''    if (global._gdiSmokeProbeStarted)
       return;
     global._gdiSmokeProbeStarted = true;
@@ -100,6 +100,7 @@ probe = r'''    if (global._gdiSmokeProbeStarted)
       await validateGeometry(palette, report);
       await validateIntelligence(palette, report);
       await validateClipboard(palette, report);
+      await validateNotifications(palette, report);
       await validateActions(palette, report);
       await validateStress(palette, report);
       await validatePerf(palette, () => this._onShortcutPressed(), report);
@@ -614,6 +615,38 @@ for expected in \
   'pointer-clipboard-copy-click-copies=true' \
   'pointer-clipboard-dismiss-click-hides=true' \
   'pointer-clipboard-hide-row-click-dismisses=true' \
+  'notifications-empty-state=true' \
+  'notifications-list-rows=true' \
+  'notifications-sensitive-excluded=true' \
+  'notifications-row-content=true' \
+  'notifications-long-body-preview=true' \
+  'notifications-not-marked-read=true' \
+  'notifications-detail-shown=true' \
+  'notifications-copy-text=true' \
+  'notifications-detail-back=true' \
+  'notifications-detail-escape-to-list=true' \
+  'notifications-dismiss-removed=true' \
+  'notifications-open-activates=true' \
+  'notifications-vanished-refresh=true' \
+  'notifications-summarize-echo=true' \
+  'notifications-sensitive-never-sent=true' \
+  'notifications-context-note=true' \
+  'notifications-no-replace-control=true' \
+  'notifications-history-not-written=true' \
+  'notifications-digest-exclusion-end-to-end=true' \
+  'notifications-ask-command-row=true' \
+  'notifications-ask-echo=true' \
+  'notifications-ask-bare-prompt=true' \
+  'notifications-ask-prompt-echo=true' \
+  'notifications-ask-escape-to-list=true' \
+  'notifications-provider-offline-visible=true' \
+  'notifications-launcher-unaffected=true' \
+  'notifications-tray-clean=true' \
+  'pointer-notifications-row-opens-detail=true' \
+  'pointer-notifications-copy-text-copies=true' \
+  'pointer-notifications-back-click-returns=true' \
+  'pointer-notifications-dismiss-click-removes=true' \
+  'pointer-notifications-summarize-click-runs=true' \
   'probe-complete=true'; do
   if ! grep -Fq "GDI_TEST $expected" "$HOME/nested-shell.log"; then
     echo "Nested UI check did not pass: $expected" >&2

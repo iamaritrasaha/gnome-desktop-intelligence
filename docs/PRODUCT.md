@@ -282,6 +282,40 @@ feature is deliberately narrow, GNOME-native and read/transform/copy only:
   never included in diagnostics or logs, and never inspected continuously.
   Models load only after the user explicitly chooses an intelligence action.
 
+## Phase 6 — Notification Intelligence
+
+GDI can inspect and work with the notifications GNOME currently lists —
+without monitoring them, without replacing GNOME's notification system, and
+without becoming a notification daemon:
+
+- The deterministic `notifications` command opens a compact Notification
+  Intelligence surface showing the notifications currently available to
+  GNOME Shell's own message tray: application/source, title, short body
+  preview and a timestamp where available, with the app icon where the tray
+  exposes one. An empty tray shows a clear empty state. Opening the surface
+  never marks anything read and never disturbs GNOME's normal tray.
+- Safe deterministic actions per notification are exactly the ones GNOME
+  itself exposes: Open (the banner's own activation path) and Dismiss, plus
+  GDI-local Copy text. Nothing is invented per notification; if GNOME 46
+  cannot do something, GDI does not pretend to.
+- Explicit AI actions — `summarize notifications` and `ask notifications
+  <question>` (or the rows on the surface) — build one bounded digest of the
+  currently listed notifications (repeated same-app notifications grouped,
+  12,000-character budget) and run it through the existing Ask/response
+  surface with Copy, Retry and Clear. AI processing happens only after the
+  user explicitly chooses one of those actions; the model loads only then.
+- Privacy: no notification history anywhere, no background capture, no
+  notification content in diagnostics or logs. Notification text lives only
+  in bounded RAM — the surface's plain data and one service-side context
+  with the same 15-minute lifetime as a selection snapshot. Obvious
+  secret/password/OTP content is excluded conservatively (counted, never
+  shown, never sent). Notifications-derived Ask interactions are never
+  persisted to Intelligence History; copying a result out is the user's own
+  explicit act.
+- Performance: listing is a synchronous in-Shell pass over GNOME's tray with
+  no Ollama involvement; no polling loop exists — the surface refreshes only
+  when opened or when the user chooses Refresh.
+
 ## Later phases
 
 Broader system actions beyond the Phase 4 registry, autocomplete prediction and

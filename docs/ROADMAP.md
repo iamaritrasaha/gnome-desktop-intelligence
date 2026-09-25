@@ -176,8 +176,36 @@ browser automation.
 - [x] Nested probes: strip shown/length-only/dismiss/return, command rows,
   fresh-read echo fixture (clipboard changed while open), no Replace control,
   Copy result, Retry registered-text stale protection, ask command + bare
-  prompt + Escape unwind, empty and oversized explicit errors, provider
-  offline, launcher unaffected, no history; real-pointer coverage for the
+  prompt + real Enter + Escape unwind, empty and oversized explicit errors,
+  provider offline, launcher unaffected, no history; real-pointer coverage for the
   strip chip, Copy, dismiss button and Hide row.
+- [ ] Physical everyday acceptance on the real desktop (next normal login).
+
+## Phase 6 — Notification Intelligence
+
+- [x] Deterministic `notifications` command opening a compact surface over
+  the notifications GNOME's own message tray currently lists — app/source,
+  title, short body preview, timestamp, app icon where available; explicit
+  Refresh; empty state; no tray disturbance and no read-marking.
+- [x] One-shot reads only: no polling, no tray event subscriptions, no
+  background capture at any layer; refresh happens on open or on the
+  explicit Refresh action.
+- [x] Safe deterministic actions limited to what GNOME 46 exposes:
+  Open (`notification.activate()`, the banner's own path) and Dismiss
+  (`destroy(DISMISSED)`), plus GDI-local Copy text; a notification that
+  vanishes while the surface is open degrades to a notice + refresh.
+- [x] Explicit AI actions: `summarize notifications`, `ask notifications`,
+  `ask notifications <question>` and surface rows — one bounded, grouped
+  digest of the currently listed notifications through the existing
+  Ask/response surface; model loads only after the explicit action.
+- [x] Privacy: no notification history, no persistence (Intelligence
+  History writes skipped), no content in diagnostics/logs, bounded RAM
+  context only (15-minute expiry, owner checks), conservative
+  secret/OTP exclusion verified end-to-end with echo fixtures.
+- [x] Nested probes: empty state, list content, sensitive exclusion
+  (list + provider end-to-end), not-marked-read, detail Open/Dismiss/
+  Copy, Escape unwind, vanished-notification refresh, summarize/ask echo
+  payloads, provider offline, launcher unaffected, tray-clean teardown;
+  real-pointer coverage for row/detail/copy/back/dismiss/summarize.
 - [ ] Physical everyday acceptance on the real desktop (next normal login).
 

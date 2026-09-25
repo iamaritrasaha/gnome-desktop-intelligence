@@ -13,6 +13,7 @@ import Gio from 'gi://Gio';
 import Clutter from 'gi://Clutter';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
 
 import {captureFocusedContext} from './src/intelligence/ServiceClient.js';
 
@@ -793,6 +794,119 @@ export async function validatePointer(palette, report) {
     }
     palette.close();
     await pause(200);
+
+    /* 15. Notification Intelligence with real pointer events: a notification
+     *     row opens the detail view, Copy text really copies, Back returns to
+     *     the list, Dismiss removes through GNOME's own destroy, and the
+     *     Summarize row runs the established flow to the echo result. */
+    const notifSource = new MessageTray.Source({
+      title: 'GDI Pointer Notes',
+      icon: new Gio.ThemedIcon({name: 'application-x-executable'}),
+    });
+    // Banners suppressed: GNOME acknowledges a notification when its banner
+    // shows, and a banner overlay could also interfere with real clicks.
+    const bannersWereBlocked = Main.messageTray.bannerBlocked;
+    Main.messageTray.bannerBlocked = true;
+    try {
+      Main.messageTray.add(notifSource);
+      const pointerNotification = new MessageTray.Notification({
+        source: notifSource,
+        title: 'Pointer note',
+        body: 'EchoFixture:NotifPointerEcho5 marker body.',
+      });
+      const plainNotification = new MessageTray.Notification({
+        source: notifSource,
+        title: 'Plain note',
+        body: 'A second fixture for dismissal.',
+      });
+      notifSource.addNotification(pointerNotification);
+      notifSource.addNotification(plainNotification);
+
+      palette.open();
+      await pause(400);
+      palette._entry.set_text('notifications');
+      await waitFor(() => palette._items.some(item => item.type === 'notification'));
+      const detailIndexOf = name => palette._items.findIndex(item =>
+        item.type === 'notification' && item.name === name);
+      await clickActor(driver,
+        palette._results.get_children()[detailIndexOf('Pointer note')]);
+      const detailed = await waitFor(() => palette._mode === 'notification-detail');
+      report('pointer-notifications-row-opens-detail', detailed &&
+        palette._writingControls.get_children().some(button =>
+          button.label === 'Dismiss'));
+
+      const copyTextButton = palette._writingControls.get_children()
+        .find(button => button.label === 'Copy text');
+      if (copyTextButton && detailed) {
+        await clickActor(driver, copyTextButton);
+        let copied = false;
+        for (let i = 0; i < 40 && !copied; i++) {
+          await pause(100);
+          copied = (await clipboardText()).includes('EchoFixture:NotifPointerEcho5');
+        }
+        report('pointer-notifications-copy-text-copies', copied);
+      } else {
+        report('pointer-notifications-copy-text-copies', false);
+      }
+
+      const backButton = palette._writingControls.get_children()
+        .find(button => button.label === 'Back');
+      if (backButton && detailed) {
+        await clickActor(driver, backButton);
+        await pause(150);
+        report('pointer-notifications-back-click-returns',
+          palette._mode === 'notifications');
+      } else {
+        report('pointer-notifications-back-click-returns', false);
+      }
+
+      await clickActor(driver,
+        palette._results.get_children()[detailIndexOf('Plain note')]);
+      await waitFor(() => palette._mode === 'notification-detail');
+      const dismissButton = palette._writingControls.get_children()
+        .find(button => button.label === 'Dismiss');
+      if (dismissButton) {
+        await clickActor(driver, dismissButton);
+        await pause(200);
+        report('pointer-notifications-dismiss-click-removes',
+          palette._mode === 'notifications' &&
+          !palette._items.some(item => item.type === 'notification' &&
+            item.name === 'Plain note') &&
+          notifSource.notifications.length === 1);
+      } else {
+        report('pointer-notifications-dismiss-click-removes', false);
+      }
+
+      const summarizeRow = palette._results.get_children()[palette._items
+        .findIndex(item => item.type === 'notification-ai' && item.actionKey === 'summarize')];
+      if (summarizeRow) {
+        await clickActor(driver, summarizeRow);
+        const ranFlow = await waitFor(() =>
+          palette._mode === 'writing-result' || palette._mode === 'writing-error', 140);
+        report('pointer-notifications-summarize-click-runs', ranFlow &&
+          palette._writingSuggestion === 'NotifPointerEcho5 marker body.');
+      } else {
+        report('pointer-notifications-summarize-click-runs', false);
+      }
+      palette.close();
+      await pause(200);
+    } catch (error) {
+      for (const name of ['pointer-notifications-row-opens-detail',
+        'pointer-notifications-copy-text-copies',
+        'pointer-notifications-back-click-returns',
+        'pointer-notifications-dismiss-click-removes',
+        'pointer-notifications-summarize-click-runs'])
+        report(name, false);
+      console.log('GDI_DEBUG pointer-notifications-error', String(error.message ?? error));
+      palette.close();
+    } finally {
+      try {
+        notifSource.destroy(MessageTray.NotificationDestroyedReason.SOURCE_CLOSED);
+      } catch {
+        /* Already gone. */
+      }
+      Main.messageTray.bannerBlocked = bannersWereBlocked;
+    }
   } catch (error) {
     report('pointer-probe-error', String(error.message ?? error));
     palette.close();

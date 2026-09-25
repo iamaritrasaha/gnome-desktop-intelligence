@@ -5,6 +5,7 @@ import Gio from 'gi://Gio';
 import Shell from 'gi://Shell';
 import { captureFocusedContext, releaseContext, requestStats } from './src/intelligence/ServiceClient.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
 
 const pause = ms => new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
   resolve(); return GLib.SOURCE_REMOVE;
@@ -806,4 +807,316 @@ export async function validateClipboard(palette, report) {
   await setClipboard(' ');
   palette.close();
   await pause(200);
+}
+
+/* Notification Intelligence: GNOME-tray reads on explicit opens only, the
+ * compact list with app/title/preview/time, per-notification Open/Dismiss/
+ * Copy detail actions, the sensitive-content exclusion, the explicit
+ * summarize/ask actions through the established pipeline, and the tray being
+ * untouched by any of it. Fixtures are real MessageTray sources. */
+export async function validateNotifications(palette, report) {
+  const until = async predicate => {
+    for (let i = 0; i < 140; i++) {
+      if (predicate()) return;
+      await pause(50);
+    }
+    throw new Error(`notifications check timed out in mode ${palette._mode}`);
+  };
+  const bodyText = () => palette._writingContent.get_children()
+    .map(child => child.text ?? '').join('\n');
+  const controlLabels = () => palette._writingControls.get_children()
+    .map(button => button.label);
+  const readClipboard = () => new Promise(resolve =>
+    St.Clipboard.get_default().get_text(St.ClipboardType.CLIPBOARD,
+      (_clipboard, text) => resolve(text)));
+  const nativeKey = key => new Promise((resolve, reject) => {
+    const process = Gio.Subprocess.new(['/usr/bin/python3',
+      `${GLib.getenv('GDI_TEST_ROOT')}/tools/press-key.py`, key],
+    Gio.SubprocessFlags.NONE);
+    process.wait_check_async(null, (object, result) => {
+      try { object.wait_check_finish(result); resolve(); } catch (error) { reject(error); }
+    });
+  });
+  const reopen = async query => {
+    palette.close();
+    await pause(200);
+    palette.open();
+    await pause(400);
+    if (query !== undefined)
+      palette._entry.set_text(query);
+  };
+  const trayHasSource = source => {
+    try {
+      return Main.messageTray.getSources().includes(source);
+    } catch {
+      return false;
+    }
+  };
+  const notificationRows = () =>
+    palette._items.filter(item => item.type === 'notification');
+  const clickControl = label =>
+    palette._writingControls.get_children().find(button => button.label === label)
+      ?.emit('clicked', 1);
+
+  palette.close();
+  await pause(200);
+  palette._settings.set_string('model-endpoint',
+    `http://127.0.0.1:${GLib.getenv('GDI_MOCK_PORT')}`);
+
+  const created = [];
+  const addFixture = ({appName, items}) => {
+    const source = new MessageTray.Source({
+      title: appName,
+      icon: new Gio.ThemedIcon({name: 'application-x-executable'}),
+    });
+    Main.messageTray.add(source);
+    const notifications = items.map(({title, body}) => {
+      const notification = new MessageTray.Notification({source, title, body});
+      source.addNotification(notification);
+      return notification;
+    });
+    created.push(source);
+    return {source, notifications};
+  };
+  const cleanTray = () => {
+    for (const source of created.splice(0)) {
+      try {
+        source.destroy(MessageTray.NotificationDestroyedReason.SOURCE_CLOSED);
+      } catch {
+        /* Already gone. */
+      }
+    }
+  };
+
+  // Banners suppressed inside the disposable nested session: GNOME
+  // acknowledges a notification when its banner is shown, which would race
+  // the not-marked-read probe. With banners blocked the fixtures stay
+  // unacknowledged, so any GDI-caused write would be visible.
+  const bannersWereBlocked = Main.messageTray.bannerBlocked;
+  Main.messageTray.bannerBlocked = true;
+
+  try {
+    // 1. Empty state: no fixtures yet — the surface explains itself and still
+    //    offers Refresh; nothing model-facing is ever shown here.
+    await reopen('notifications');
+    await until(() => palette._mode === 'notifications' &&
+      palette._items.some(item => item.type === 'notification-refresh'));
+    report('notifications-empty-state', notificationRows().length === 0 &&
+      !palette._items.some(item => item.type === 'notification-ai') &&
+      palette._launcherNote.visible &&
+      palette._launcherNote.text.includes('no notifications'));
+
+    // 2. Fixtures: multiple apps, repeated notifications, a long body, and a
+    //    detectably sensitive one. Rows show app, title, preview and time.
+    const mailer = addFixture({appName: 'GDI Mailer', items: [
+      {title: 'Weekly report', body: 'Your weekly summary is ready to review.'},
+      {title: 'Meeting notes', body: 'Notes from the platform review are available.'},
+    ]});
+    const ci = addFixture({appName: 'GDI CI', items: [0, 1, 2].map(index => ({
+      title: 'Build passed',
+      body: `Run ${index + 1}: EchoFixture:NotifDigestToken9 checks passed.`,
+    }))});
+    const notesApp = addFixture({appName: 'GDI Notes', items: [
+      {title: 'Long body', body: `GDI-LongBody: ${'x'.repeat(300)}`},
+    ]});
+    const timer = addFixture({appName: 'GDI Timer', items: [
+      {title: 'Break time', body: 'Stand up and stretch.'},
+    ]});
+    const secrets = addFixture({appName: 'GDI Secrets', items: [
+      {title: 'Sign in', body: 'Your verification code is 555123. EchoFixture:NotifSecretToken8'},
+    ]});
+
+    const refreshIndex = () => palette._items.findIndex(item =>
+      item.type === 'notification-refresh');
+    palette._activateItem(refreshIndex());
+    await pause(120);
+    report('notifications-list-rows', palette._mode === 'notifications' &&
+      notificationRows().length === 7 &&
+      palette._items.some(item => item.type === 'notification-ai' &&
+        item.actionKey === 'summarize') &&
+      palette._items.some(item => item.type === 'notification-ai' &&
+        item.actionKey === 'ask'));
+    report('notifications-sensitive-excluded',
+      !palette._items.some(item =>
+        (item.description ?? '').includes('555123') ||
+        (item.description ?? '').includes('verification code')) &&
+      palette._launcherNote.text.includes('sensitive'));
+
+    const mailerRow = notificationRows().find(row => row.name === 'Weekly report');
+    report('notifications-row-content', Boolean(mailerRow) &&
+      (mailerRow.description ?? '').includes('GDI Mailer') &&
+      (mailerRow.description ?? '').includes('weekly summary') &&
+      typeof mailerRow.typeLabel === 'string');
+    const longRow = notificationRows().find(row => row.name === 'Long body');
+    report('notifications-long-body-preview', Boolean(longRow) &&
+      (longRow.description ?? '').includes('GDI-LongBody') &&
+      (longRow.description ?? '').endsWith('…') &&
+      (longRow.description ?? '').length < 160);
+
+    // 3. Viewing in GDI never marks anything read.
+    report('notifications-not-marked-read',
+      [...mailer.notifications, ...ci.notifications, ...notesApp.notifications,
+        ...timer.notifications, ...secrets.notifications]
+        .every(notification => !notification.acknowledged));
+
+    // 4. Detail view: the notification's own text plus GNOME's own actions.
+    const detailIndexOf = name => palette._items.findIndex(item =>
+      item.type === 'notification' && item.name === name);
+    palette._activateItem(detailIndexOf('Long body'));
+    await pause(120);
+    report('notifications-detail-shown', palette._mode === 'notification-detail' &&
+      bodyText().includes('GDI-LongBody') &&
+      ['Open', 'Dismiss', 'Copy text', 'Back'].every(label =>
+        controlLabels().includes(label)));
+    clickControl('Copy text');
+    await pause(250);
+    const copiedDetail = await readClipboard();
+    report('notifications-copy-text', typeof copiedDetail === 'string' &&
+      copiedDetail.startsWith('Long body') && copiedDetail.includes('GDI-LongBody'));
+    clickControl('Back');
+    await pause(120);
+    report('notifications-detail-back', palette._mode === 'notifications' &&
+      palette._items.length > 1);
+    // Escape unwinds the detail to the list as well.
+    palette._activateItem(detailIndexOf('Long body'));
+    await pause(120);
+    await nativeKey('escape');
+    await pause(150);
+    report('notifications-detail-escape-to-list',
+      palette._mode === 'notifications' && palette._items.length > 1);
+
+    // 5. Dismiss goes through GNOME's own destroy; the list reflects it and
+    //    the source survives while it still has notifications.
+    palette._activateItem(detailIndexOf('Weekly report'));
+    await pause(120);
+    clickControl('Dismiss');
+    await pause(150);
+    report('notifications-dismiss-removed',
+      palette._mode === 'notifications' &&
+      notificationRows().length === 6 &&
+      !notificationRows().some(row => row.name === 'Weekly report') &&
+      trayHasSource(mailer.source) && mailer.source.notifications.length === 1);
+
+    // 6. Open activates exactly the banner's own path and closes the palette;
+    //    the source self-destroys with its last notification.
+    palette._activateItem(detailIndexOf('Meeting notes'));
+    await pause(120);
+    clickControl('Open');
+    await pause(250);
+    report('notifications-open-activates', !palette._isOpen &&
+      !trayHasSource(mailer.source));
+
+    // 7. A notification vanishing while GDI is open is reflected on refresh.
+    await reopen('notifications');
+    await until(() => palette._items.some(item => item.type === 'notification'));
+    notesApp.notifications[0].destroy(MessageTray.NotificationDestroyedReason.EXPIRED);
+    palette._activateItem(refreshIndex());
+    await pause(120);
+    report('notifications-vanished-refresh', palette._mode === 'notifications' &&
+      notificationRows().length === 4 &&
+      !notificationRows().some(row => row.name === 'Long body'));
+
+    // 8. Summarize: the echo fixture proves exactly what reached the
+    //    provider — the bounded digest of currently listed notifications,
+    //    grouped, without the sensitive notification's content.
+    const summarizeIndex = () => palette._items.findIndex(item =>
+      item.type === 'notification-ai' && item.actionKey === 'summarize');
+    palette._activateItem(summarizeIndex());
+    await until(() => palette._mode === 'writing-result');
+    // The grouped CI run reaches the provider as one "(×3)" line: the echo
+    // proves both the payload and the grouping end to end.
+    report('notifications-summarize-echo',
+      palette._writingSuggestion === 'NotifDigestToken9 checks passed. (×3)');
+    report('notifications-sensitive-never-sent',
+      !palette._writingSuggestion.includes('555123') &&
+      !palette._writingSuggestion.includes('NotifSecretToken8'));
+    report('notifications-context-note', bodyText().includes('currently listed notifications') &&
+      bodyText().includes('never saved'));
+    report('notifications-no-replace-control', !controlLabels().some(label =>
+      label.toLowerCase().includes('replace') || label.toLowerCase().includes('insert')));
+    report('notifications-history-not-written', palette._conversationId === null);
+    clickControl('Clear');
+    await pause(150);
+
+    // 9. With only non-sensitive notifications left, the digest carries no
+    //    echo marker at all — the provider answers with its default fixture
+    //    response, proving the sensitive notification was excluded from the
+    //    registered context end to end.
+    for (const notification of ci.notifications)
+      notification.destroy(MessageTray.NotificationDestroyedReason.EXPIRED);
+    await reopen('notifications');
+    await until(() => palette._items.some(item => item.type === 'notification'));
+    palette._activateItem(summarizeIndex());
+    await until(() => palette._mode === 'writing-result');
+    report('notifications-digest-exclusion-end-to-end',
+      palette._writingSuggestion.includes('Fixture answer') &&
+      !palette._writingSuggestion.includes('NotifSecretToken8'));
+    clickControl('Clear');
+    await pause(150);
+
+    // 10. `ask notifications <question>` sends only the question with the
+    //     digest as context, through the established Ask pipeline.
+    await reopen('ask notifications EchoFixture:NotifAskEcho7');
+    await until(() => palette._items[0]?.type === 'notification-ai' &&
+      palette._items[0]?.actionKey === 'ask');
+    report('notifications-ask-command-row',
+      palette._items[0].question === 'EchoFixture:NotifAskEcho7');
+    palette._activateItem(0);
+    await until(() => palette._mode === 'writing-result');
+    report('notifications-ask-echo', palette._writingSuggestion === 'NotifAskEcho7');
+    clickControl('Clear');
+    await pause(150);
+
+    // 11. Bare `ask notifications` enters the question prompt, sends nothing,
+    //     and a real Enter runs it; Escape from the prompt unwinds to the list.
+    await reopen('ask notifications');
+    await until(() => palette._items[0]?.type === 'notification-ai' &&
+      palette._items[0]?.actionKey === 'ask');
+    palette._activateItem(0);
+    report('notifications-ask-bare-prompt', palette._mode === 'writing-question');
+    palette._entry.set_text('EchoFixture:NotifPromptEcho3');
+    await nativeKey('enter');
+    await until(() => palette._mode === 'writing-result');
+    report('notifications-ask-prompt-echo', palette._writingSuggestion === 'NotifPromptEcho3');
+    clickControl('Clear');
+    await pause(150);
+    await reopen('ask notifications');
+    await until(() => palette._items[0]?.type === 'notification-ai' &&
+      palette._items[0]?.actionKey === 'ask');
+    palette._activateItem(0);
+    await pause(120);
+    await nativeKey('escape');
+    await pause(150);
+    report('notifications-ask-escape-to-list', palette._mode === 'notifications' &&
+      palette._items.some(item => item.type === 'notification-refresh'));
+
+    // 12. Provider offline: an explicitly chosen action surfaces the
+    //     established visible error with Retry, never a silent no-op.
+    palette._settings.set_string('model-endpoint', 'http://127.0.0.1:1');
+    await reopen('summarize notifications');
+    await until(() => palette._items[0]?.type === 'notification-ai');
+    palette._activateItem(0);
+    await until(() => palette._mode === 'writing-error');
+    report('notifications-provider-offline-visible',
+      bodyText().length > 0 && controlLabels().includes('Retry'));
+    palette._settings.set_string('model-endpoint',
+      `http://127.0.0.1:${GLib.getenv('GDI_MOCK_PORT')}`);
+
+    // 13. The deterministic launcher is untouched while notifications exist.
+    await reopen('memory usage');
+    await until(() => palette._items[0]?.type === 'action');
+    report('notifications-launcher-unaffected',
+      palette._items[0].plan?.steps?.[0]?.id === 'system.memoryStatus');
+  } finally {
+    cleanTray();
+    Main.messageTray.bannerBlocked = bannersWereBlocked;
+    await pause(200);
+  }
+
+  // 14. Closing drops every notification reference; the tray holds no GDI
+  //     fixtures afterwards.
+  palette.close();
+  await pause(250);
+  report('notifications-tray-clean', created.length === 0 &&
+    palette._notificationRefs.length === 0);
 }

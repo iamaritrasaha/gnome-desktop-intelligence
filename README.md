@@ -29,6 +29,7 @@ GDI combines both into one native GNOME surface:
 * **real desktop control** through GNOME's own APIs — volume, Bluetooth,
   Wi-Fi, power profiles, appearance and more,
 * **Clipboard Intelligence** for understanding or transforming copied text,
+* **Notification Intelligence** for catching up on what GNOME is telling you,
 * **Intelligence History** stored locally on your machine.
 
 No account or cloud service is required. There is no telemetry. With the
@@ -65,6 +66,14 @@ improve, fix, explain, translate or answer questions about it. Clipboard text
 is read only during explicit GDI interaction, is never monitored in the
 background, and clipboard transformations are copy-out only — GDI never
 pretends it can modify the source application.
+
+**Notification Intelligence** — `notifications` opens a compact list of what
+GNOME is currently telling you: app, title, preview and time, with Open,
+Dismiss and Copy text per notification. `summarize notifications` and
+`ask notifications <question>` work from that same current set. GDI never
+monitors notifications in the background, never marks them read by showing
+them, keeps no notification history, and never sends obvious
+password/verification-code content to a model.
 
 **Native GNOME actions** — `volume 30`, `mute`, `turn bluetooth off`,
 `switch to power saver`, `turn on dark mode`, `show my ip`, `open downloads`,
@@ -170,6 +179,7 @@ fully reversible systemd profile.
 | Type | Search apps, files, actions — or just ask a question |
 | `open <name>` · `find <terms>` · `search <words>` · `ask <question>` | Direct commands |
 | `clipboard` · `summarize clipboard` · `ask clipboard <question>` | Clipboard Intelligence |
+| `notifications` · `summarize notifications` · `ask notifications <question>` | Notification Intelligence |
 | `↑` / `↓` · `Enter` | Navigate and activate results |
 | `Tab` | Complete an app name |
 | `Page Up` / `Page Down` | Scroll an Ask answer |

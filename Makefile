@@ -58,6 +58,7 @@ test-passive: lint
 test-refinement: test-passive
 	node tools/test-actions.mjs
 	node tools/test-clipboard.mjs
+	node tools/test-notifications.mjs
 	node tools/test-presentation.mjs
 	node tools/test-writing-menu.mjs
 	python3 tools/test-writing-refinement.py

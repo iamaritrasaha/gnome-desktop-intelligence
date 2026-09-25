@@ -73,6 +73,10 @@ INTROSPECTION_XML = """
       <arg type="s" name="text" direction="in"/>
       <arg type="s" name="token" direction="out"/>
     </method>
+    <method name="SetNotificationsContext">
+      <arg type="s" name="text" direction="in"/>
+      <arg type="s" name="token" direction="out"/>
+    </method>
     <method name="AcceptPrediction">
       <arg type="s" name="token" direction="in"/>
       <arg type="i" name="words" direction="in"/>
@@ -349,6 +353,39 @@ class GdiService(SelectionContext):
                     "start": -1, "end": -1, "caret": -1,
                     "created": time.monotonic(), "accessible": None,
                     "editable": False, "stale": False, "source": "clipboard",
+                    "owner": _sender,
+                    "expiry_id": GLib.timeout_add_seconds(
+                        CONTEXT_LIFETIME_SECONDS,
+                        lambda: self._expire_context(token)),
+                }
+                self._contexts[token] = context
+                invocation.return_value(GLib.Variant('(s)', (token,)))
+            elif method == 'SetNotificationsContext':
+                # Notification Intelligence: the Shell reads the currently
+                # listed notifications from its own message tray on the
+                # explicit user action and registers one bounded digest here
+                # so the established Transform pipeline applies. The digest
+                # lives in the same bounded RAM context as a selection
+                # snapshot — 15 minute expiry, owner checks, MAX_CONTEXTS
+                # pruning — and is never logged, persisted or diarized. There
+                # is no accessible, so Replace/Undo fail closed by
+                # construction, and no history is written for it.
+                text = args[0]
+                if not isinstance(text, str) or not text.strip():
+                    raise ProviderError('There are no notifications to work with right now.')
+                if len(text) > 12000:
+                    raise ProviderError(
+                        f'The notification digest is too long ({len(text)} characters). '
+                        "GDI works with up to 12,000.")
+                self._passive.dismiss('explicit')
+                self._prune_contexts()
+                token = secrets.token_urlsafe(24)
+                context = {
+                    "token": token, "selected": text, "nearby": "",
+                    "application": "Notifications", "role": "notifications",
+                    "start": -1, "end": -1, "caret": -1,
+                    "created": time.monotonic(), "accessible": None,
+                    "editable": False, "stale": False, "source": "notifications",
                     "owner": _sender,
                     "expiry_id": GLib.timeout_add_seconds(
                         CONTEXT_LIFETIME_SECONDS,

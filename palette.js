@@ -6,7 +6,8 @@
  */
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import { gettext as _ } from
+import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
+import { gettext as _, ngettext } from
   'resource:///org/gnome/shell/extensions/extension.js';
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
@@ -41,6 +42,7 @@ import {
   resetActionDiagnostics,
   residencyStatus,
   setClipboardContext,
+  setNotificationsContext,
   transform,
   streamTransform,
   undoReplacement,
@@ -52,6 +54,15 @@ import {
   clipboardCapabilities,
   clipboardCommandFor,
 } from './src/intelligence/ClipboardTools.js';
+
+import {
+  assessNotifications,
+  buildNotificationDigest,
+  formatNotificationTime,
+  notificationCapabilities,
+  notificationRowData,
+  notificationsCommandFor,
+} from './src/intelligence/NotificationTools.js';
 
 import { askQueryRemainder, historyGroups, isResponse, preferAssistant, selectionIntentParts } from './src/intelligence/Presentation.js';
 import { addDiff, addMarkdown, StreamRenderer } from './src/intelligence/ResponseView.js';
@@ -174,6 +185,12 @@ export class LauncherPalette {
     this._clipboardRowsShown = false;
     this._clipboardNotice = false;
     this._clipboardGeneration = 0;
+    // Notification Intelligence state: plain references to the notifications
+    // currently listed by GNOME's own tray, held only while the surface is
+    // open — no observation, no persistence, no history.
+    this._notificationRefs = [];
+    this._notificationsNotice = '';
+    this._notificationDetailRefIndex = -1;
     this._motionSettings = new Gio.Settings({
       schema_id: 'org.gnome.desktop.interface',
     });
@@ -648,7 +665,8 @@ export class LauncherPalette {
     const widthLimit = PALETTE_WIDTH;
     const width = Math.min(widthLimit, availableWidth);
     this._palette.set_width(width);
-    if (this._mode.startsWith('writing-') || this._mode.startsWith('history-')) {
+    if (this._mode.startsWith('writing-') || this._mode.startsWith('history-') ||
+        this._mode === 'notification-detail') {
       const anchor = this._calculatePlacement(monitor, PALETTE_FIXED_HEIGHT, Main.panel.height);
       const available = monitor.y + monitor.height - BOTTOM_GUTTER - anchor.y;
       this._writingControls.vertical = width < 420;
@@ -687,13 +705,17 @@ export class LauncherPalette {
   _onQueryChanged() {
     if (!this._isOpen)
       return;
-    if (!['launcher', 'writing-actions'].includes(this._mode))
+    if (!['launcher', 'writing-actions', 'notifications'].includes(this._mode))
       return;
 
     // A clipboard error note belongs to the command that produced it; editing
     // the query acknowledges it. Capture-status notes are unaffected.
     if (this._clipboardNotice) {
       this._clipboardNotice = false;
+      this._launcherNote.hide();
+    }
+    if (this._notificationsNotice) {
+      this._notificationsNotice = '';
       this._launcherNote.hide();
     }
 
@@ -712,6 +734,12 @@ export class LauncherPalette {
     if (!query) {
       if (this._mode === 'writing-actions') {
         this._renderWritingChips(this._currentMenuItems ?? []);
+        return;
+      }
+      // Clearing the query on the notifications surface returns to the list
+      // (re-collected); every other mode shows the plain launcher.
+      if (this._mode === 'notifications') {
+        this._showNotifications();
         return;
       }
       this._clearResults();
@@ -754,6 +782,14 @@ export class LauncherPalette {
     const clipboardCommand = clipboardCommandFor(query);
     if (clipboardCommand) {
       this._handleClipboardCommand(clipboardCommand);
+      return;
+    }
+    // Notification Intelligence commands: same shape — deterministic rows,
+    // explicit activation, nothing model-facing before it. Checked before the
+    // plain 'ask' prefix so 'ask notifications …' keeps its context.
+    const notificationsCommand = notificationsCommandFor(query);
+    if (notificationsCommand) {
+      this._handleNotificationsCommand(notificationsCommand);
       return;
     }
     const webMatch = query.match(/^search\s+(.+)$/i);
@@ -1201,7 +1237,8 @@ export class LauncherPalette {
       title.clutter_text.ellipsize = Pango.EllipsizeMode.END;
       labels.add_child(title);
 
-      const description = item.type === 'file' ? item.description : null;
+      const description = item.type === 'file' || item.type === 'notification'
+        ? item.description : null;
       if (description) {
         const detail = new St.Label({
           style_class: 'gdi-result-description',
@@ -1216,7 +1253,8 @@ export class LauncherPalette {
 
       const typeLabel = new St.Label({
         style_class: 'gdi-result-type',
-        text: item.suggested ? _('Suggested') : this._getTypeLabel(item.type),
+        text: item.suggested ? _('Suggested')
+          : (item.typeLabel !== undefined ? item.typeLabel : this._getTypeLabel(item.type)),
         y_align: Clutter.ActorAlign.CENTER,
       });
       typeLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
@@ -1553,6 +1591,314 @@ export class LauncherPalette {
     this._schedulePosition();
   }
 
+  /* ---------------------------------------------------------------- */
+  /* Notification Intelligence.                                         */
+  /*                                                                    */
+  /* Reads GNOME Shell's own message tray — the notifications that are  */
+  /* currently listed only — synchronously, while the surface is open   */
+  /* or a notifications command runs. No polling, no change signals,    */
+  /* no acknowledged writes (viewing here never marks anything read),   */
+  /* no persistence and no model work until an explicit summarize/ask   */
+  /* action registers one bounded digest as an ordinary RAM context.    */
+  /* ---------------------------------------------------------------- */
+
+  _collectNotificationSnapshots() {
+    const refs = [];
+    const snapshots = [];
+    let sources = [];
+    try {
+      sources = Main.messageTray.getSources() ?? [];
+    } catch {
+      sources = [];
+    }
+    for (const source of sources) {
+      let notifications = [];
+      try {
+        notifications = source.notifications ?? [];
+      } catch {
+        continue;
+      }
+      for (const notification of notifications) {
+        let appName = '', title = '', body = '', epoch = 0, gicon = null;
+        try {
+          appName = String(source.title ?? '').trim();
+          title = String(notification.title ?? '').trim();
+          body = String(notification.body ?? '').trim();
+          epoch = notification.datetime ? notification.datetime.to_unix() : 0;
+          gicon = source.icon ?? notification.gicon ?? null;
+        } catch {
+          // Vanished mid-read: it is simply not offered.
+          continue;
+        }
+        refs.push({source, notification, gicon});
+        snapshots.push({refIndex: refs.length - 1, appName, title, body, epoch});
+      }
+    }
+    this._notificationRefs = refs;
+    return snapshots;
+  }
+
+  _notificationIcon(refIndex) {
+    const ref = this._notificationRefs[refIndex];
+    if (ref?.gicon)
+      return ref.gicon;
+    return new Gio.ThemedIcon({name: 'application-x-executable'});
+  }
+
+  _notificationTimeLabel(label) {
+    if (label === 'now')
+      return _('now');
+    if (label === 'Yesterday')
+      return _('Yesterday');
+    return label;
+  }
+
+  _showNotifications() {
+    if (!this._isOpen)
+      return;
+    this._mode = 'notifications';
+    this._searchRow.show();
+    this._writingView.hide();
+    this._entry.hint_text = _('Ask, search, or open…');
+    this._searchIcon.gicon = this._intelligenceIcon;
+    this._clearResults();
+
+    const now = Date.now() / 1000;
+    const {items, hiddenSensitive, total} =
+      assessNotifications(this._collectNotificationSnapshots(), {now});
+    const notes = [];
+    if (this._notificationsNotice) {
+      notes.push(this._notificationsNotice);
+      this._notificationsNotice = '';
+    }
+    if (!total && !hiddenSensitive)
+      notes.push(_('There are no notifications right now.'));
+    if (hiddenSensitive)
+      notes.push(ngettext('%d potentially sensitive notification is excluded.',
+        '%d potentially sensitive notifications are excluded.', hiddenSensitive)
+        .format(hiddenSensitive));
+    this._launcherNote.text = notes.join('\n');
+    this._launcherNote.visible = notes.length > 0;
+
+    const rows = items.map(snapshot => {
+      const data = notificationRowData(snapshot, {now});
+      return {
+        type: 'notification',
+        refIndex: snapshot.refIndex,
+        name: data.title,
+        description: data.description,
+        typeLabel: this._notificationTimeLabel(data.timeLabel),
+        icon: this._notificationIcon(snapshot.refIndex),
+      };
+    });
+    if (items.length) {
+      rows.push({
+        type: 'notification-ai', actionKey: 'summarize',
+        name: _('Summarize notifications'), icon: this._intelligenceIcon,
+      });
+      rows.push({
+        type: 'notification-ai', actionKey: 'ask', question: '',
+        name: _('Ask Intelligence about notifications'), icon: this._intelligenceIcon,
+      });
+    }
+    rows.push({
+      type: 'notification-refresh', name: _('Refresh notifications'),
+      icon: new Gio.ThemedIcon({name: 'view-refresh-symbolic'}),
+    });
+    this._setResults(rows, rows.length);
+  }
+
+  _handleNotificationsCommand(command) {
+    if (command.kind === 'surface') {
+      this._showNotifications();
+      return;
+    }
+    // The typed command only proposes a row — the action runs on explicit
+    // activation, exactly like the clipboard commands.
+    this._setResults([{
+      type: 'notification-ai',
+      actionKey: command.actionKey,
+      question: command.question ?? '',
+      name: command.actionKey === 'ask'
+        ? _('Ask Intelligence about notifications') : _('Summarize notifications'),
+      icon: this._intelligenceIcon,
+    }]);
+  }
+
+  _startNotificationsAI(actionKey, {question = '', label = null} = {}) {
+    if (!this._isOpen)
+      return;
+    if (actionKey === 'ask' && !question.trim()) {
+      // The question is asked before anything is read or sent.
+      this._writingAction = {key: 'ask', label: _('Ask Intelligence'), notifications: true};
+      this._prewarmAssistant();
+      this._enterQuestionPrompt(_('Ask about your notifications…'));
+      return;
+    }
+    const actionLabel = label ?? (actionKey === 'ask'
+      ? _('Ask Intelligence') : _('Summarize notifications'));
+    const generation = this._writingGeneration;
+    // The digest is built from the notifications listed at this exact moment;
+    // it never includes detected-sensitive content.
+    const now = Date.now() / 1000;
+    const {items} = assessNotifications(this._collectNotificationSnapshots(), {now});
+    if (!items.length) {
+      this._showNotificationsNotice(_('There are no notifications to work with right now.'));
+      return;
+    }
+    const digest = buildNotificationDigest(items, {now});
+    setNotificationsContext(digest.text, (reply, error) => {
+      if (!this._isOpen || generation !== this._writingGeneration)
+        return;
+      if (error || !reply?.[0]) {
+        this._showNotificationsNotice(error ? errorMessage(error)
+          : _('GDI could not register the notifications.'));
+        return;
+      }
+      releaseContext(this._writingContext?.token);
+      this._writingContext = {
+        token: reply[0], selected: digest.text, nearby: '',
+        application: 'Notifications', role: 'notifications',
+        start: -1, end: -1, caret: -1, editable: false,
+        capabilities: notificationCapabilities(), notifications: true,
+        notificationsCount: digest.included,
+      };
+      recordSignal(reply[0], actionKey, 'action_selected', this._learningEnabled());
+      this._startWritingRequest({key: actionKey, label: actionLabel}, question);
+    });
+  }
+
+  _showNotificationsNotice(message) {
+    // Failures are explicit and stay on the notifications surface, never a
+    // silent no-op and never a dead surface.
+    this._mode = 'notifications';
+    this._writingAction = null;
+    this._searchRow.show();
+    this._writingView.hide();
+    this._notificationsNotice = message;
+    this._showNotifications();
+  }
+
+  _showNotificationDetail(refIndex) {
+    const ref = this._notificationRefs[refIndex];
+    if (!ref) {
+      this._showNotifications();
+      return;
+    }
+    let appName = '', title = '', body = '', epoch = 0;
+    try {
+      appName = String(ref.source.title ?? '').trim();
+      title = String(ref.notification.title ?? '').trim();
+      body = String(ref.notification.body ?? '').trim();
+      epoch = ref.notification.datetime ? ref.notification.datetime.to_unix() : 0;
+    } catch {
+      this._showNotificationsNotice(_('This notification is no longer available.'));
+      return;
+    }
+    this._notificationDetailRefIndex = refIndex;
+    this._mode = 'notification-detail';
+    this._searchRow.hide();
+    this._clearResults();
+    this._launcherNote.hide();
+    this._palette.add_style_class_name('gdi-ai-mode');
+    this._writingContent.destroy_all_children();
+    this._writingControls.destroy_all_children();
+    this._writingScroll.show();
+    this._writingView.show();
+    this._followup.hide();
+
+    const header = new St.BoxLayout({
+      style_class: 'gdi-writing-header', x_expand: true,
+    });
+    header.add_child(new St.Icon({gicon: this._notificationIcon(refIndex), icon_size: 18}));
+    const appLabel = new St.Label({
+      style_class: 'gdi-writing-heading',
+      text: appName || _('Notification'),
+      x_expand: true,
+      y_align: Clutter.ActorAlign.CENTER,
+    });
+    appLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+    header.add_child(appLabel);
+    this._writingContent.add_child(header);
+
+    const timeLabel = this._notificationTimeLabel(
+      formatNotificationTime(epoch, Date.now() / 1000));
+    if (timeLabel)
+      this._writingContent.add_child(new St.Label({
+        text: timeLabel, style_class: 'gdi-context-note', x_expand: true,
+      }));
+    if (title) {
+      const titleLabel = new St.Label({
+        style_class: 'gdi-notification-title', text: title, x_expand: true,
+      });
+      titleLabel.clutter_text.line_wrap = true;
+      titleLabel.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+      titleLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+      this._writingContent.add_child(titleLabel);
+    }
+    if (body) {
+      const bodyLabel = new St.Label({
+        style_class: 'gdi-writing-text', text: body.slice(0, 2000), x_expand: true,
+      });
+      bodyLabel.clutter_text.line_wrap = true;
+      bodyLabel.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+      bodyLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+      this._writingContent.add_child(bodyLabel);
+    }
+    if (!title && !body)
+      this._writingContent.add_child(new St.Label({
+        text: _('This notification has no text.'),
+        style_class: 'gdi-context-note', x_expand: true,
+      }));
+
+    // Open and Dismiss are GNOME's own notification actions — the same calls
+    // the banner itself makes; nothing is invented per notification. Copy is
+    // GDI-local on the text already shown.
+    this._addWritingButton(_('Open'), () => this._openNotification(refIndex), false);
+    this._addWritingButton(_('Dismiss'), () => this._dismissNotification(refIndex), true);
+    if (title || body)
+      this._addWritingButton(_('Copy text'), () =>
+        this._copyNotificationText(title, body), true);
+    this._addWritingButton(_('Back'), () => this._showNotifications(), true);
+    this._positionPalette();
+    global.stage.set_key_focus(this._writingControls.get_first_child());
+  }
+
+  _openNotification(refIndex) {
+    const ref = this._notificationRefs[refIndex];
+    if (!ref) {
+      this._showNotifications();
+      return;
+    }
+    // The palette closes first so the activated application receives real
+    // focus; activate() is exactly the banner's own open path.
+    this.close();
+    try {
+      ref.notification.activate();
+    } catch (error) {
+      console.warn(`GDI could not open a notification: ${error.message}`);
+    }
+  }
+
+  _dismissNotification(refIndex) {
+    const ref = this._notificationRefs[refIndex];
+    try {
+      ref?.notification.destroy(MessageTray.NotificationDestroyedReason.DISMISSED);
+    } catch {
+      // Already gone — the refresh below reflects reality either way.
+    }
+    this._showNotifications();
+  }
+
+  _copyNotificationText(title, body) {
+    St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD,
+      [title, body].filter(Boolean).join('\n'));
+    const copyButton = this._writingControls.get_children()
+      .find(button => button.label === _('Copy text'));
+    if (copyButton)
+      copyButton.label = _('Copied');
+  }
+
   _resetWritingState() {
     this._stopStream();
     this._stopProcessing();
@@ -1562,6 +1908,9 @@ export class LauncherPalette {
     this._submenu = null;
     this._historyConversation = null;
     this._historyClearArmed = false;
+    this._notificationRefs = [];
+    this._notificationsNotice = '';
+    this._notificationDetailRefIndex = -1;
     this._followup.hide();
     this._launcherNote.hide();
     this._pendingPlan = null;
@@ -2053,10 +2402,11 @@ export class LauncherPalette {
     // on completion. History stays local, and a failure never blocks the
     // request — it only means the turn is not persisted.
     let conversationId = '';
-    // Clipboard Intelligence is transient by design: clipboard-derived
-    // interactions are never written to Intelligence History, whatever the
-    // history setting says.
-    if (isResponse(action.key) && this._historyEnabled() && !this._writingContext?.clipboard) {
+    // Clipboard Intelligence and Notification Intelligence are transient by
+    // design: their interactions are never written to Intelligence History,
+    // whatever the history setting says.
+    if (isResponse(action.key) && this._historyEnabled() &&
+        !this._writingContext?.clipboard && !this._writingContext?.notifications) {
       try {
         if (!this._conversationId)
           this._conversationId = await historyStart(this._settings.get_string('model-assistant'));
@@ -2134,6 +2484,16 @@ export class LauncherPalette {
   }
 
   _addContextNotice() {
+    if (this._writingContext?.notifications) {
+      // Notification results always state their source and their limits: the
+      // digest covered the notifications listed at action time and nothing
+      // is saved.
+      this._writingContent.add_child(new St.Label({
+        text: _('Using %d currently listed notifications · read-only and never saved')
+          .format(this._writingContext.notificationsCount ?? 0),
+        style_class: 'gdi-context-note'}));
+      return;
+    }
     if (this._writingContext?.clipboard) {
       // Clipboard results always state their source and their limits: GDI
       // read the clipboard text and can only copy the result back.
@@ -2433,6 +2793,12 @@ export class LauncherPalette {
       return _('Action');
     case 'clipboard-action':
       return _('Clipboard');
+    case 'notification':
+      return _('Notification');
+    case 'notification-ai':
+      return _('Notifications');
+    case 'notification-refresh':
+      return '';
     case 'history-open':
       return '';
     default:
@@ -2476,13 +2842,23 @@ export class LauncherPalette {
             this._writingAction.label);
           return Clutter.EVENT_STOP;
         }
+        // Notifications actions likewise ask first and register the digest
+        // only now, with the question in hand.
+        if (this._writingAction?.notifications && !this._writingContext?.token) {
+          this._startNotificationsAI(this._writingAction.key, {
+            question,
+            label: this._writingAction.label,
+          });
+          return Clutter.EVENT_STOP;
+        }
         this._startWritingRequest(this._writingAction, question);
         return Clutter.EVENT_STOP;
       }
       return Clutter.EVENT_PROPAGATE;
     }
 
-    if (this._mode !== 'launcher' && this._mode !== 'writing-actions') {
+    if (this._mode !== 'launcher' && this._mode !== 'writing-actions' &&
+        this._mode !== 'notifications') {
       if (key === Clutter.KEY_Escape) {
         this.close();
         return Clutter.EVENT_STOP;
@@ -2625,6 +3001,14 @@ export class LauncherPalette {
           this._showHistoryList();
         return Clutter.EVENT_STOP;
       }
+      // The notification detail and its question prompt unwind to the
+      // notifications list; the prompt never read or sent anything.
+      if (this._mode === 'notification-detail' ||
+          (this._mode === 'writing-question' && this._writingAction?.notifications &&
+           !this._writingContext?.token)) {
+        this._showNotifications();
+        return Clutter.EVENT_STOP;
+      }
       // A clipboard question prompt unwinds to the launcher with the strip
       // state intact; nothing was read or sent while the prompt was open.
       if (this._mode === 'writing-question' && this._writingAction?.clipboard &&
@@ -2700,6 +3084,21 @@ export class LauncherPalette {
     if (item.type === 'clipboard-dismiss') {
       this._dismissClipboardSuggestions();
       this._clearResults();
+      return;
+    }
+    if (item.type === 'notification') {
+      this._showNotificationDetail(item.refIndex);
+      return;
+    }
+    if (item.type === 'notification-ai') {
+      this._startNotificationsAI(item.actionKey, {
+        question: item.question ?? '',
+        label: item.name,
+      });
+      return;
+    }
+    if (item.type === 'notification-refresh') {
+      this._showNotifications();
       return;
     }
     if (item.type === 'selection-intent') {
