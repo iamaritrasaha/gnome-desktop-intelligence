@@ -9,6 +9,12 @@ class Handler(BaseHTTPRequestHandler):
         pass
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        # Residency preloads (/api/generate without messages) are legitimate
+        # lifecycle traffic in nested tests: acknowledge without generating.
+        if 'messages' not in body:
+            self.send_response(200); self.end_headers()
+            self.wfile.write(json.dumps({'done': True, 'message': {'content': ''}}).encode())
+            return
         prompt = body['messages'][-1]['content']
         time.sleep(3 if 'slow fixture' in prompt else .2)
         try:

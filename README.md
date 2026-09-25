@@ -1,110 +1,180 @@
-# GNOME Desktop Intelligence
+<p align="center">
+  <img src="icons/hicolor/scalable/apps/gdi-intelligence-symbolic.svg" width="96" alt="GNOME Desktop Intelligence logo">
+</p>
 
-GNOME Desktop Intelligence (GDI) is a GNOME Shell launcher foundation for a
-local intelligence layer. Phase 1 provides a compact keyboard-driven palette,
-application and file search, web search, and a safe calculator. Deterministic
-launcher actions work without an AI backend.
+<h1 align="center">GNOME Desktop Intelligence</h1>
 
-## Build and install
+<p align="center">
+  <strong>Local intelligence, built into the GNOME desktop.</strong><br>
+  One native launcher that finds and opens things instantly — and adds a fully
+  local AI layer for writing, questions and desktop actions when you want it.
+</p>
 
-Requirements: GNOME Shell 46, GJS, `gnome-extensions`, GLib schema tools,
-Python 3/PyGObject, AT-SPI 2 and libsoup 3 introspection libraries, plus `zip`/`unzip`. Ollama is
-optional; a text-generation model is needed only for intelligence actions.
+<p align="center">
+  <a href="#compatibility"><img alt="GNOME 46" src="https://img.shields.io/badge/GNOME-46-4a86cf?logo=gnome&logoColor=white"></a>
+  <a href="LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/badge/License-GPL--3.0-blue.svg"></a>
+  <a href="#privacy-and-safety"><img alt="Local-first" src="https://img.shields.io/badge/Local--first-no%20telemetry-2e7d32"></a>
+  <img alt="Linux" src="https://img.shields.io/badge/OS-Linux-f9a825?logo=linux&logoColor=black">
+</p>
+
+---
+
+## Why GDI
+
+Most launchers stop at finding apps. Most assistants live in a browser tab.
+GDI combines both into one native GNOME surface:
+
+* an **instant launcher** that works without any AI backend,
+* a **local AI assistant** for questions, writing help and predictive typing,
+* **real desktop control** through GNOME's own APIs — volume, Bluetooth,
+  Wi-Fi, power profiles, appearance and more,
+* **Intelligence History** kept entirely on your machine.
+
+No accounts. No cloud. No telemetry. Your text stays on your computer.
+
+## Features
+
+**Instant launcher** — Apps, files, web search and a calculator. Deterministic
+results appear immediately; nothing waits on a model.
+
+**Ask Intelligence** — A local conversational assistant with streaming
+answers, Markdown, code blocks and follow-up questions.
+
+**Writing Intelligence** — Select text anywhere GDI can read it: proofread,
+rewrite, shorten, expand, change tone, translate — or continue writing from
+the caret. Every edit shows a preview before it replaces anything.
+
+**Predictive writing** — Optional short continuations as subdued ghost text
+while you type in supported GTK editors. Tab accepts, Escape dismisses.
+
+**Native GNOME actions** — `volume 30`, `mute`, `turn bluetooth off`,
+`switch to power saver`, `turn on dark mode`, `show my ip`, `open downloads`,
+`how much disk space do I have` — and small chains like `turn bluetooth off
+and switch to power saver`. Disruptive changes ask first; every mutation
+verifies its own result.
+
+**Local-first** — Runs against [Ollama](https://ollama.com) on your machine.
+History is a local database you can disable or clear. There is no telemetry
+and no network service anywhere in the product.
+
+## Native by design
+
+GDI is built from the GNOME stack, not on top of a cross-platform framework:
+
+* **GNOME Shell / GJS** for the palette, panel indicator and desktop actions
+* **GTK 4 / libadwaita** for the Preferences window
+* **GIO, GSettings, D-Bus, AT-SPI** for apps, files, settings, accessibility
+* **GVC** — GNOME Shell's own mixer — for audio
+
+There is no Qt, KDE, Electron or Tauri code, and no arbitrary shell execution
+at any layer: every desktop action goes through a small, inspectable registry
+of typed, validated actions.
+
+## Installation
+
+Requirements: Ubuntu (or any distribution) with **GNOME Shell 46**, and the
+standard development tools plus introspection libraries:
+`gjs`, `gnome-extensions`, `libglib2.0-dev-bin` (schema compiler),
+`gir1.2-atspi-2.0`, `gir1.2-soup-3.0`, Python 3 with PyGObject, and `zip`.
 
 ```sh
-make lint pack
+git clone https://github.com/iamaritrasaha/gnome-desktop-intelligence
+cd gnome-desktop-intelligence
 make install
 gnome-extensions enable gdi@gnome.desktop.intelligence
 ```
 
-The default shortcut is `Ctrl+Super+Space`; change it from the panel
-indicator's Settings item. Enter an application name to find and launch it.
-Use `open <name>`, `find <terms>` or `file <name>` to search files in your home
-folders (`find resume pdf` narrows to PDFs, `find pdfs modified today` to
-recent files), or `search <words>` to open a web search in the default browser.
-Arithmetic such as `15 * (2 + 3)` produces a calculator result that Enter copies.
-
-## Native desktop actions (Phase 4)
-
-Common desktop requests run directly through GNOME APIs, deterministically and
-without a model: `open downloads`, `open display settings`, `volume 30`,
-`mute`, `turn bluetooth off`, `turn wifi on`, `switch to power saver`,
-`turn on dark mode`, `night light off`, `brightness 40`, `show my ip`,
-`how much disk space do I have`, `memory usage`, `battery`, and small
-combinations such as `turn bluetooth off and switch to power saver`. Actions
-that can disrupt something (Wi-Fi off, text-size changes, Bluetooth off with
-connected devices) ask first with a compact confirmation; everything else
-executes immediately and answers with “✓ …” or a short fact. When a query is
-not understood deterministically, a small locally configured routing model may
-propose one registered action (marked “Suggested”); anything else falls back to
-Ask Intelligence. There is no shell command execution at any layer, and no
-file deletion or package management. See `docs/ARCHITECTURE.md` for the full
-registry, backends and safety policy.
-
-If the running Shell has not indexed a newly installed extension directory,
-enable GDI after your next normal login. Development commands do not restart
-or log out the desktop session.
-
-To remove the extension:
+The extension activates on your next normal login (GNOME caches loaded
+extension modules). To remove it:
 
 ```sh
 gnome-extensions disable gdi@gnome.desktop.intelligence
 gnome-extensions uninstall gdi@gnome.desktop.intelligence
 ```
 
-The launcher uses a GDI-owned palette and search/action pipeline. It does not
-use Rudra's providers, plugin execution, clipboard history, or AI client, and
-does not require Ollama. See `docs/` for product scope, architecture, decisions,
-and current validation state. Upstream code attribution and licensing are in
-`NOTICE.md` and `LICENSE`.
+## Models and Ollama
 
-## Explicit intelligence
+The launcher, desktop actions, files and calculator are **deterministic and
+never need a model** — GDI works fully without Ollama installed. Intelligence
+features (Ask, Writing Tools, predictive writing) use
+[Ollama](https://ollama.com) locally.
 
-An unmatched question offers **Ask Intelligence**. Select text in an accessible
-application before invoking the shortcut for writing tools. Review the preview
-before Replace; Copy works without editing the target. Escape cancels.
-Configure the endpoint and model names in Settings and use **Check** to discover
-installed models. The default endpoint is `http://127.0.0.1:11434`.
+Models are configured by role in **Settings → AI & Models**:
 
-Validate with `python3 tools/test-model-routing.py`,
-`python3 tools/test-safety.py`, `python3 tools/test-provider.py --real`, and
-`tools/validate-nested-wayland.sh` after `make lint pack`. The real-provider test
-loads only configured existing models using synthetic text. See
-`docs/CURRENT_STATE.md` for compatibility and physical testing instructions.
+| Role | Used for | Default |
+| --- | --- | --- |
+| Quick | Writing tools, passive correction, prediction | `LiquidAI/lfm2.5-1.2b-instruct:q4_k_m` |
+| Assistant | Ask Intelligence | `qwen3.5:4b` |
+| Reasoning | Explicitly requested harder tasks | `qwen3.5:4b` |
 
-For physical Phase 2 testing without changing the running desktop, run
-`tools/try-phase2.sh`. It opens an isolated nested GNOME desktop and a synthetic
-sample in GNOME Text Editor. Close that desktop to clean up the test session.
+The **Resource mode** setting controls how models are kept warm:
 
-The package includes both schema XML and `schemas/gschemas.compiled`. Packaging
-rejects missing/stale compiled schemas; installation and the physical-test
-runner compile and verify their own schema directory before use. Run
-`tools/try-phase2.sh --check` for an automated check of the actual isolated
-setup, including GNOME Preferences, shared settings, native Ctrl+Super+Space
-and extension disable/re-enable. It leaves the active desktop unchanged.
+* **Low GPU** — shortest warm periods, no preloading, one request at a time.
+* **Balanced** (default) — the quick model stays warm briefly after use, the
+  assistant model preloads while you type an Ask question, one generation at
+  a time.
+* **Performance** — longer warm periods and two concurrent requests.
 
-For the visual regression pass, run `tools/try-phase2.sh --visual`. It checks
-installed settings/shortcuts, then captures GNOME 46 light/dark palette and
-Preferences fixtures at 100% and 110% text scaling under `build/validation/visual/`.
-It uses a private mock endpoint for the generating-state capture; it does not
-load a real model or change the active desktop theme.
+Models always expire on their own after their warm period; GDI never
+force-unloads a model, so anything another application loaded stays exactly
+where it is. Task-appropriate context sizes keep VRAM use small for
+prediction and routing. On very limited GPUs you can also tune the Ollama
+server itself — `tools/ollama-desktop-profile.sh` shows an optional,
+explicitly applied and fully reversible systemd profile.
 
-## Passive writing (Phase 3)
+## Keyboard
 
-Run `tools/try-phase3.sh` for the isolated physical-test desktop, then enable
-**Passive writing assistance** in GDI Settings → General → Writing. Type a
-completed sentence in GNOME Text Editor and pause. Ctrl+Alt+Enter accepts a
-visible correction; Escape dismisses; Ctrl+Alt+Z performs guarded GDI Undo.
-Optional Tab is limited to supported GTK multiline fields. Personalization
-and retaining edited text examples are separate opt-ins in Privacy.
+| Keys | Action |
+| --- | --- |
+| `Ctrl+Super+Space` (configurable) | Open or dismiss the palette |
+| Type | Search apps, files, actions — or just ask a question |
+| `open <name>` · `find <terms>` · `search <words>` · `ask <question>` | Direct commands |
+| `↑` / `↓` · `Enter` | Navigate and activate results |
+| `Tab` | Complete an app name |
+| `Page Up` / `Page Down` | Scroll an Ask answer |
+| `Escape` | Step back, cancel, or close |
 
-Initial scope is conservative English proofreading in accessible multiline GTK
-editors. Firefox/Gecko range editing and GTK 4 single-line fields are excluded;
-see `docs/CURRENT_STATE.md` for the tested API/privacy limitations. No ordinary
-typed text is saved by default. No launcher redesign or broader system actions.
+While writing assistance is enabled: `Ctrl+Alt+Enter` accepts a correction,
+`Ctrl+Alt+Z` is GDI's guarded undo, `Right` accepts a predicted word,
+`Escape` dismisses. Passive `Tab` acceptance is optional and limited to
+supported GTK multiline editors.
 
-`make test-passive pack` checks schemas, syntax and quality/learning regressions.
-`tools/try-phase3.sh --check` runs synthetic end-to-end tests and real-application
-compatibility probes in nested GNOME 46; `--apps` runs only the compatibility
-probes. `GSETTINGS_BACKEND=memory python3 tools/test-passive-model.py` checks the
-configured default local writing model with three synthetic sentences.
+## Privacy and safety
+
+* **Local-first**: intelligence runs against your local Ollama. No cloud
+  calls, no telemetry, no accounts.
+* **Password fields are excluded** from every capture; GDI fails closed when
+  a field cannot be proven non-sensitive.
+* **No shell execution**: desktop actions come from a fixed registry of
+  native, typed actions. Model output can only ever *suggest* one of them and
+  is re-validated before anything runs.
+* **History is yours**: Ask conversations are stored in a local database you
+  can disable or clear from Settings. Typed text is never stored.
+
+## Compatibility
+
+GDI targets **GNOME Shell 46** on Wayland (Ubuntu 24.04 and similar).
+Writing tools work where the toolkit exposes safe, editable text — GTK 4
+multiline editors are fully supported; browsers and single-line fields are
+read-limited or excluded by design. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full capability and
+privacy model.
+
+## Development
+
+```sh
+make lint        # strict schema compile + JS/Python syntax checks
+make pack        # build and verify the extension package
+make test-refinement  # parser, service, provider, history, residency suites
+```
+
+Integration tests run in disposable nested GNOME 46 Wayland sessions —
+including real pointer-driven UI tests injected through Mutter. Nothing in
+the test suite touches your running desktop session.
+
+## Credits and license
+
+GNOME Desktop Intelligence is licensed under
+[GPL-3.0](LICENSE). The launcher's palette and search architecture is adapted
+from [Rudra by NarkAgni](https://github.com/NarkAgni/rudra); upstream
+attribution details are in [NOTICE.md](NOTICE.md).

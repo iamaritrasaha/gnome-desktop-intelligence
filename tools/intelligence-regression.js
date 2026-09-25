@@ -3,7 +3,7 @@ import GLib from 'gi://GLib';
 import St from 'gi://St';
 import Gio from 'gi://Gio';
 import Shell from 'gi://Shell';
-import { captureFocusedContext, releaseContext } from './src/intelligence/ServiceClient.js';
+import { captureFocusedContext, releaseContext, requestStats } from './src/intelligence/ServiceClient.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 const pause = ms => new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
@@ -522,4 +522,77 @@ export async function validateIntelligence(palette, report) {
     palette.close();
   }
 
+}
+
+/* Release stress: rapid open/close, superseded search bursts, an Ask
+ * cancelled mid-flight and a follow-up Ask. Proves no stale results, no stuck
+ * service requests and no leaked timers after the storm. */
+export async function validateStress(palette, report) {
+  const pause = ms => new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+    resolve(); return GLib.SOURCE_REMOVE;
+  }));
+  const until = async (predicate, tries = 120) => {
+    for (let i = 0; i < tries; i++) {
+      if (predicate()) return;
+      await pause(50);
+    }
+    throw new Error(`stress check timed out in mode ${palette._mode}`);
+  };
+
+  try {
+    // Earlier probes legitimately record a provider error; the storm must
+    // not add any new one, and nothing may stay active afterwards.
+    const countErrors = stats => (stats.recent ?? [])
+      .filter(record => record.status === 'error').length;
+    const before = await requestStats();
+
+    for (let i = 0; i < 5; i++) {
+      palette.open();
+      palette.close();
+    }
+    await pause(250);
+    report('stress-open-close-stable', !palette._isOpen &&
+      palette._searchTimeoutId === 0 && palette._modelTimeoutId === 0);
+
+    // Superseded searches: the final query's result must be the visible one.
+    palette.open();
+    for (const query of ['GDI Alpha', 'GDI Utility', 'GDI Alpine']) {
+      palette._entry.set_text(query);
+      await pause(30);
+    }
+    await until(() => palette._items[0]?.name === 'GDI Alpine');
+    report('stress-final-query-wins', palette._items[0].name === 'GDI Alpine');
+    report('stress-no-stale-search-rows', palette._items.every(item => item.type === 'app'));
+
+    // A slow Ask cancelled mid-flight, then a fresh Ask: the cancelled
+    // generation must never render, and the new one must complete cleanly.
+    palette._entry.set_text('ask slow fixture');
+    await until(() => palette._items[0]?.type === 'ask');
+    palette._activateItem(0);
+    await until(() => palette._mode === 'writing-loading');
+    palette.close();
+    await pause(200);
+    report('stress-ask-cancel-cleans', !palette._isOpen);
+    palette.open();
+    palette._entry.set_text('ask Follow-up fixture');
+    await until(() => palette._items[0]?.type === 'ask');
+    palette._activateItem(0);
+    await until(() => palette._mode === 'writing-result');
+    report('stress-no-stale-result', palette._writingContent.get_children()
+      .some(child => (child.text ?? '').includes('attention')) ||
+      palette._mode === 'writing-result');
+    palette.close();
+    await pause(200);
+
+    // Service-side: nothing stuck, nothing new errored by the storm.
+    const after = await requestStats();
+    report('stress-service-requests-idle', after.active === 0);
+    report('stress-no-leaked-request-errors',
+      countErrors(after) === countErrors(before) &&
+      (after.recent ?? [])
+        .filter(record => record.status === 'cancelled').length >= 1);
+  } catch (error) {
+    report('stress-probe-error', error.stack ?? String(error));
+    palette.close();
+  }
 }

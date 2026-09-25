@@ -64,6 +64,7 @@ test-refinement: test-passive
 	python3 tools/test-history.py
 	python3 tools/test-streaming.py
 	python3 tools/test-model-routing.py
+	python3 tools/test-residency.py
 	python3 tools/test-action-service.py
 	python3 tools/test-safety.py
 	python3 tools/test-provider.py

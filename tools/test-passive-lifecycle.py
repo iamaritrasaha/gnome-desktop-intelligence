@@ -10,6 +10,7 @@ import gi
 gi.require_version('Atspi', '2.0')
 from gi.repository import Atspi
 from passive import PassiveWriting
+from scheduler import RequestScheduler
 
 text='This are a useful sentence.'
 for scenario in ('disabled-learning','cleared-learning','cancelled','unwritable-store'):
@@ -19,6 +20,9 @@ for scenario in ('disabled-learning','cleared-learning','cancelled','unwritable-
     settings.get_string.return_value='fixture-model'
     service=MagicMock()
     service._contexts={}
+    # A real scheduler: submit() must invoke the request start immediately so
+    # the mocked router call happens exactly as it does in production.
+    service._scheduler=RequestScheduler(1)
     service._watch_context.side_effect=lambda context: context.update(ready=True)
     service._release_context.side_effect=lambda token: service._contexts.pop(token,None)
     service._learning.allows.return_value=True

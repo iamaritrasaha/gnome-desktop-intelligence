@@ -1,6 +1,235 @@
-/build/
-/schemas/gschemas.compiled
-*.shell-extension.zip
+# ============================================================
+# GNOME Desktop Intelligence - .gitignore
+# ============================================================
 
+# Build / package output
+build/
+dist/
+out/
+release/
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.deb
+*.rpm
+
+# GNOME / GSettings generated files
+schemas/gschemas.compiled
+**/schemas/gschemas.compiled
+
+# Generated validation / screenshots / test output
+validation/
+screenshots/
+test-output/
+test-results/
+coverage/
+.nyc_output/
+
+# Temporary / runtime files
+tmp/
+temp/
+.cache/
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+*.bak
+*.old
+*.orig
+*.rej
+*.pid
+*.lock
+*.log
+
+# Local databases / learning state / runtime data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+data/
+local-data/
+runtime/
+state/
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+*.secret
+*.secrets
+secrets/
+credentials/
+credentials.json
+local-config.*
+config.local.*
+settings.local.*
+
+# IDE / editor state
+.idea/
+.vscode/
+*.code-workspace
+.project
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# OS / desktop junk
+.DS_Store
+Thumbs.db
+desktop.ini
+.directory
+
+# Node / JS tooling
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.eslintcache
+
+# Python tooling
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# ------------------------------------------------------------
+# AI coding agents / assistants / private development context
+# ------------------------------------------------------------
+
+# Agent instructions and handoff/context files
+AGENTS.md
+AGENT.md
+CLAUDE.md
+GEMINI.md
+COPILOT.md
+AI.md
+AI_NOTES.md
+AI_CONTEXT.md
+AI_CONTEXT/
+PROMPTS.md
+PROMPTS/
+prompts/
+agent-notes/
+agent-work/
+agent-context/
+.agent/
+.agents/
+
+# Repository-backed AI handoff documents
+docs/CURRENT_STATE.md
+docs/DECISIONS.md
+docs/AGENTS.md
+docs/AI*.md
+docs/*AI*.md
+docs/*AGENT*.md
+docs/*PROMPT*.md
+
+# Codex / OpenAI
+.codex/
+codex/
+.codex-*
+.codexrc
+.openai/
+openai/
+
+# Claude
+.claude/
+claude/
+.claude-*
+claude_desktop_config.json
+
+# Gemini
+.gemini/
+gemini/
+.gemini-*
+
+# Cursor
+.cursor/
+.cursorignore
+.cursorules
+.cursorrules
+
+# Continue
+.continue/
+continue/
+
+# Aider
+.aider*
+.aider/
+aider/
+
+# Windsurf / Codeium
+.windsurf/
+.codeium/
+
+# Roo / Cline
+.roo/
+.roocode/
+.cline/
+
+# Zed assistant/local state
+.zed/
+
+# Generic LLM / agent traces and exports
+llm-logs/
+llm_logs/
+agent-logs/
+agent_logs/
+chat-logs/
+chat_logs/
+conversations/
+sessions/
+traces/
+evals/
+eval-results/
+model-output/
+model_outputs/
+generated-prompts/
+scratch/
+scratchpad/
+notes-private/
+private-notes/
+
+# Local model files / adapters / checkpoints
+models/
+checkpoints/
+adapters/
+loras/
+*.gguf
+*.ggml
+*.safetensors
+*.bin
+*.onnx
+*.pt
+*.pth
+*.ckpt
+
+# Local test harness / nested GNOME state
+.gnome-test/
+.gnome-shell-test/
+nested-shell/
+test-home/
+physical-test/
+*.test-home/
+
+# Misc generated files
+*.generated.*
+*.cache
+*.trace
+
+# Z.AI local development metadata
+.zai/
+zai/
+
+# ZCode local workspace state
+.zcode/

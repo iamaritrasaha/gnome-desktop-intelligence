@@ -33,12 +33,14 @@ import {
   historyRename,
   historyStart,
   historyTrim,
+  prewarmModel,
   recordSignal,
   recordActionDiagnostic,
   recordActionUse,
   releaseContext,
   replaceSelection,
   resetActionDiagnostics,
+  residencyStatus,
   transform,
   streamTransform,
   undoReplacement,
@@ -75,6 +77,38 @@ const LAUNCHER_RESULTS_HEIGHT = 194;
 const HISTORY_COMMAND = /^history$/i;
 const HISTORY_LABELS = ['Today', 'Yesterday', 'Earlier'];
 const HISTORY_LIST_LIMIT = 60;
+// Deterministic results render on every keystroke; the file scan keeps a
+// short debounce and the routing model waits until typing has stabilized.
+const FILE_SEARCH_DEBOUNCE_MS = 90;
+const MODEL_SUGGESTION_IDLE_MS = 350;
+const RANKING_TTL_MS = 30_000;
+
+const WEB_ICON = new Gio.ThemedIcon({name: 'web-browser-symbolic'});
+const CALC_ICON = new Gio.ThemedIcon({name: 'accessories-calculator-symbolic'});
+
+/* Developer diagnostics: one line per residency role, e.g.
+ * "Quick · warm · 0.8 GB VRAM · expires in 62s". */
+function residencyLines(status) {
+  if (!status)
+    return _('Model residency is unavailable right now.');
+  const roles = status.roles ?? {};
+  const describe = role => {
+    if (!role?.resident)
+      return 'cold';
+    const seconds = role.expires_in ?? null;
+    const gigabytes = role.size_vram ? ` · ${(role.size_vram / 1e9).toFixed(1)} GB VRAM` : '';
+    return `warm${gigabytes}${seconds !== null ? ` · expires in ${seconds}s` : ''}`;
+  };
+  const lines = [`Resource mode: ${status.mode} · active requests: ${status.active_requests ?? 0}`];
+  for (const [role, label] of [['quick', 'Quick'], ['intent', 'Routing'], ['assistant', 'Assistant'], ['reasoning', 'Reasoning']]) {
+    const entry = roles[role];
+    if (entry?.model)
+      lines.push(`${label} (${entry.model}) · ${describe(entry)}`);
+  }
+  if (!(status.resident_models ?? []).length)
+    lines.push('No GDI model resident');
+  return lines.join('\n');
+}
 
 const ACTION_LABELS = {
   proofread: 'Fix grammar', rewrite: 'Improve writing', concise: 'Make concise',
@@ -95,6 +129,7 @@ export class LauncherPalette {
     this._selectedIndex = -1;
     this._queryGeneration = 0;
     this._searchTimeoutId = 0;
+    this._modelTimeoutId = 0;
     this._focusTimeoutId = 0;
     this._positionTimeoutId = 0;
     this._animationGeneration = 0;
@@ -244,6 +279,16 @@ export class LauncherPalette {
       this._onKeyPress(event));
     this._overlay.connect('captured-event', (_actor, event) =>
       this._onCapturedEvent(event));
+    // Outside-click dismissal uses the bubble phase, not captured-event: the
+    // modal grab retargets only presses that pick outside this overlay to it,
+    // while presses inside the palette reach their real actor first and then
+    // bubble here with that actor as the event source. A capture-phase handler
+    // on the overlay would instead see every inside press first and risks
+    // swallowing events that belong to palette children.
+    this._overlay.connect('button-press-event', (_actor, event) =>
+      this._onOutsidePress(event));
+    this._overlay.connect('touch-event', (_actor, event) =>
+      this._onOutsidePress(event));
   }
 
   toggle() {
@@ -387,6 +432,10 @@ export class LauncherPalette {
     if (this._searchTimeoutId) {
       GLib.source_remove(this._searchTimeoutId);
       this._searchTimeoutId = 0;
+    }
+    if (this._modelTimeoutId) {
+      GLib.source_remove(this._modelTimeoutId);
+      this._modelTimeoutId = 0;
     }
     if (this._focusTimeoutId) {
       GLib.source_remove(this._focusTimeoutId);
@@ -600,6 +649,10 @@ export class LauncherPalette {
       GLib.source_remove(this._searchTimeoutId);
       this._searchTimeoutId = 0;
     }
+    if (this._modelTimeoutId) {
+      GLib.source_remove(this._modelTimeoutId);
+      this._modelTimeoutId = 0;
+    }
     cancelFileSearch();
     const generation = ++this._queryGeneration;
     const query = this._entry.get_text().trim();
@@ -614,12 +667,10 @@ export class LauncherPalette {
       return;
     }
 
-    this._searchTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 90, () => {
-      this._searchTimeoutId = 0;
-      if (this._isOpen && generation === this._queryGeneration)
-        this._search(query, generation);
-      return GLib.SOURCE_REMOVE;
-    });
+    // Stage 1 is entirely in-memory (app cache, calculator, action parser),
+    // so it runs on every keystroke without a debounce and deterministic
+    // results appear immediately.
+    this._search(query, generation);
   }
 
   _search(query, generation) {
@@ -652,7 +703,7 @@ export class LauncherPalette {
       this._setResults([{
         type: 'web',
         name: _('Search the web for “%s”').format(term),
-        icon: new Gio.ThemedIcon({ name: 'web-browser-symbolic' }),
+        icon: WEB_ICON,
         query: term,
       }]);
       return;
@@ -663,7 +714,7 @@ export class LauncherPalette {
       this._setResults([{
         type: 'calc',
         name: String(calculatorValue),
-        icon: new Gio.ThemedIcon({ name: 'accessories-calculator-symbolic' }),
+        icon: CALC_ICON,
         value: String(calculatorValue),
       }]);
       return;
@@ -739,26 +790,35 @@ export class LauncherPalette {
         this._setResults(apps);
         return;
       }
-      // Deterministic parsing found nothing: the small routing model may map
-      // the query to one registered action when it plausibly names a desktop
-      // capability. Anything else goes to Ask Intelligence verbatim.
-      if (!preferAssistant(query, []) && mayNeedModelRouting(query)) {
-        this._startActionSuggestion(query, generation);
-        return;
-      }
+      // Deterministic parsing found nothing. Ask Intelligence is shown right
+      // away; the small routing model is consulted only after typing has
+      // stabilized, and never on every keystroke.
       this._setResults([this._askRow(query)]);
+      if (!preferAssistant(query, []) && mayNeedModelRouting(query))
+        this._scheduleActionSuggestion(query, generation);
       return;
     }
 
+    // Cached app matches are shown instantly; the file scan stays
+    // asynchronous and appends stage-2 results when it completes.
     this._setResults(apps);
     if (term.length < 2 && !fileOptions?.extension && !fileOptions?.modifiedSince)
       return;
 
-    searchFiles(term, files => {
-      if (!this._isOpen || generation !== this._queryGeneration)
-        return;
-      this._setResults([...apps, ...this._rankFiles(files)].slice(0, RESULT_LIMIT));
-    }, RESULT_LIMIT, fileOptions ?? {});
+    if (this._searchTimeoutId) {
+      GLib.source_remove(this._searchTimeoutId);
+      this._searchTimeoutId = 0;
+    }
+    this._searchTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, FILE_SEARCH_DEBOUNCE_MS, () => {
+      this._searchTimeoutId = 0;
+      if (this._isOpen && generation === this._queryGeneration)
+        searchFiles(term, files => {
+          if (!this._isOpen || generation !== this._queryGeneration)
+            return;
+          this._setResults([...apps, ...this._rankFiles(files)].slice(0, RESULT_LIMIT));
+        }, RESULT_LIMIT, fileOptions ?? {});
+      return GLib.SOURCE_REMOVE;
+    });
   }
 
   _askRow(query) {
@@ -768,6 +828,18 @@ export class LauncherPalette {
       promptOnly: query === '',
       icon: this._intelligenceIcon,
     };
+  }
+
+  _prewarmAssistant() {
+    // Entering Ask Intelligence is the only launcher surface that may begin
+    // loading a model, and it does so while the user still types their
+    // question. Plain launcher use, calculator and app launches never touch
+    // the model provider.
+    try {
+      prewarmModel('assistant');
+    } catch (_error) {
+      // The service starting up just-in-time for the real request is fine.
+    }
   }
 
   _actionPlanName(plan) {
@@ -796,25 +868,44 @@ export class LauncherPalette {
   }
 
   _refreshActionRanking() {
+    // Rankings change rarely: serve them from a short TTL cache instead of a
+    // D-Bus round trip on every palette open.
     if (!this._learningEnabled()) {
       this._actionRanking = null;
       return;
     }
+    if (this._actionRanking && this._rankingTime &&
+        GLib.get_monotonic_time() / 1000 - this._rankingTime < RANKING_TTL_MS)
+      return;
+    this._rankingTime = GLib.get_monotonic_time() / 1000;
     actionStats((stats, _error) => {
       if (stats)
         this._actionRanking = stats;
     });
   }
 
+  _scheduleActionSuggestion(query, generation) {
+    // Stage 3: consult the routing model only once the query has stopped
+    // changing. Continued typing cancels the pending call, so ordinary typing
+    // never triggers model work and the launcher never waits on it.
+    if (this._modelTimeoutId) {
+      GLib.source_remove(this._modelTimeoutId);
+      this._modelTimeoutId = 0;
+    }
+    this._modelTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, MODEL_SUGGESTION_IDLE_MS, () => {
+      this._modelTimeoutId = 0;
+      if (this._isOpen && generation === this._queryGeneration)
+        this._startActionSuggestion(query, generation);
+      return GLib.SOURCE_REMOVE;
+    });
+  }
+
   _startActionSuggestion(query, generation) {
-    // Bounded model use: one routing-model request per query, guarded by the
-    // search generation. Deterministic actions never enter this path.
+    // Bounded model use: one routing-model request per stabilized query,
+    // guarded by the search generation. Deterministic actions never enter
+    // this path, and the Ask row already on screen is not displaced while the
+    // model answers — a suggestion only replaces it when one actually fits.
     const trace = beginActionTrace({query, source: 'model'});
-    this._setResults([{
-      type: 'action-searching',
-      name: _('Looking for a matching action…'),
-      icon: this._intelligenceIcon,
-    }]);
     suggestActionFromModel(query, this._settings, trace).then(suggested => {
       if (!this._isOpen || generation !== this._queryGeneration) {
         if (trace.status === 'open')
@@ -824,7 +915,6 @@ export class LauncherPalette {
       if (!suggested) {
         if (trace.status === 'open')
           finishTrace(trace, 'complete', 'No matching action — Ask Intelligence shown');
-        this._setResults([this._askRow(query)]);
         return;
       }
       prepareAction(suggested.id, suggested.args, 'model', trace).then(plan => {
@@ -836,7 +926,6 @@ export class LauncherPalette {
         if (!plan) {
           if (trace.status === 'open')
             finishTrace(trace, 'invalid-tool-call', 'Rejected by the registry');
-          this._setResults([this._askRow(query)]);
           return;
         }
         this._setResults([{
@@ -849,14 +938,10 @@ export class LauncherPalette {
       }).catch(error => {
         if (trace.status === 'open')
           finishTrace(trace, 'failed', `Suggested plan failed: ${error?.message ?? error}`);
-        if (this._isOpen && generation === this._queryGeneration)
-          this._setResults([this._askRow(query)]);
       });
     }).catch(error => {
       if (trace.status === 'open')
         finishTrace(trace, 'failed', `Routing model unavailable: ${error?.message ?? error}`);
-      if (this._isOpen && generation === this._queryGeneration)
-        this._setResults([this._askRow(query)]);
     });
   }
 
@@ -993,6 +1078,20 @@ export class LauncherPalette {
       }, true],
       [_('Close'), () => this.close(), true],
     ]});
+    // Model residency is refreshed on demand (diagnostics open), never polled.
+    residencyStatus((status, _error) => {
+      if (!this._isOpen || this._mode !== 'action-result' ||
+          !this._writingContent.get_children().length)
+        return;
+      const note = new St.Label({
+        style_class: 'gdi-context-note', x_expand: true,
+        text: residencyLines(status),
+      });
+      note.clutter_text.line_wrap = true;
+      note.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+      this._writingContent.add_child(note);
+      this._schedulePosition();
+    });
   }
 
   _copyActionText(text) {
@@ -1333,6 +1432,8 @@ export class LauncherPalette {
     this._writingAction = {key: item.key, label: _(item.label), contextual: true, scope: item.scope ?? 'sentence'};
     // Questions need an answer before any capture happens.
     if (item.key === 'ask' || item.key === 'translate') {
+      if (item.key === 'ask')
+        this._prewarmAssistant();
       this._enterQuestionPrompt(item.key === 'translate'
         ? _('Translate into which language?')
         : _('Ask about the text at the caret…'));
@@ -1564,6 +1665,8 @@ export class LauncherPalette {
       this._learningEnabled());
 
     if (item.key === 'ask' || item.key === 'translate') {
+      if (item.key === 'ask')
+        this._prewarmAssistant();
       this._enterQuestionPrompt(item.key === 'translate'
         ? _('Translate into which language?')
         : _('Ask a question about this selection…'));
@@ -2125,6 +2228,25 @@ export class LauncherPalette {
     return true;
   }
 
+  _onOutsidePress(event) {
+    if (!this._isOpen)
+      return Clutter.EVENT_PROPAGATE;
+    // During a modal grab GNOME 46 does not preserve the picked actor on the
+    // event (get_source() returns null), so inside/outside is decided from
+    // the event's own stage coordinates against the palette's rect. Row and
+    // chip buttons never get here: their presses stay on the button actor,
+    // and only presses the grab retargets to this overlay — or bubbles from
+    // a non-interactive palette area — reach this handler.
+    const [x, y] = event.get_coords();
+    const [px, py] = this._palette.get_transformed_position();
+    const [width, height] = this._palette.get_transformed_size();
+    if (x < px || x > px + width || y < py || y > py + height) {
+      this.close();
+      return Clutter.EVENT_STOP;
+    }
+    return Clutter.EVENT_PROPAGATE;
+  }
+
   _onCapturedEvent(event) {
     if (!this._isOpen)
       return Clutter.EVENT_PROPAGATE;
@@ -2185,13 +2307,6 @@ export class LauncherPalette {
       return Clutter.EVENT_STOP;
     }
 
-    if (event.type() === Clutter.EventType.BUTTON_PRESS) {
-      const source = event.get_source();
-      if (!source || !this._palette.contains(source)) {
-        this.close();
-        return Clutter.EVENT_STOP;
-      }
-    }
     return Clutter.EVENT_PROPAGATE;
   }
 
@@ -2248,6 +2363,7 @@ export class LauncherPalette {
         this._writingContext = { token: GLib.uuid_string_random(), selected: '', nearby: '', application: '', role: '', start: -1, end: -1, caret: -1, editable: false };
       if (item.promptOnly) {
         this._writingAction = { key: 'assistant', label: _('Ask Intelligence') };
+        this._prewarmAssistant();
         this._enterQuestionPrompt(_('Ask Intelligence…'));
         return;
       }

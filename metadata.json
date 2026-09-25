@@ -2,8 +2,10 @@
   "name": "GNOME Desktop Intelligence",
   "description": "A native GNOME launcher and local intelligence layer",
   "uuid": "gdi@gnome.desktop.intelligence",
-  "shell-version": ["46"],
-  "version": 1,
+  "shell-version": [
+    "46"
+  ],
+  "version": 2,
   "gettext-domain": "gdi",
   "settings-schema": "org.gnome.shell.extensions.gdi"
 }

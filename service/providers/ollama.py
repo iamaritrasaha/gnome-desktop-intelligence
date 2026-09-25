@@ -142,8 +142,32 @@ class OllamaProvider(ModelProvider):
                 callback(None, ProviderError("Ollama returned an invalid model list."))
         self._request(endpoint, '/api/tags', None, cancellable, 5, completed)
 
+    def running_models(self, *, endpoint, cancellable, callback):
+        """Observe /api/ps: which models are resident, their VRAM footprint
+        and expiry. Used for residency diagnostics and prewarm decisions, not
+        polled."""
+        def completed(payload, error):
+            if error:
+                callback(None, error)
+                return
+            models = payload.get('models') if isinstance(payload, dict) else None
+            callback(models if isinstance(models, list) else [], None)
+        self._request(endpoint, '/api/ps', None, cancellable, 5, completed)
+
+    def preload(self, *, endpoint, model, keep_alive, cancellable, callback, timeout=180):
+        """Load a model without generating: an empty /api/generate whose only
+        effect is residency. This is Ollama's documented preloading path —
+        no ollama shell-out anywhere."""
+        if not model.strip():
+            callback(None, ProviderError("Choose a model in GDI Settings first."))
+            return
+        self._request(endpoint, '/api/generate',
+                      {'model': model.strip(), 'keep_alive': keep_alive, 'stream': False},
+                      cancellable, timeout, callback)
+
     def generate(self, *, endpoint, model, system, prompt, cancellable, callback,
-                 timeout=120, context_tokens=8192, output_tokens=1024, keep_alive=0, response_schema=None, on_chunk=None):
+                 timeout=120, context_tokens=8192, output_tokens=1024, keep_alive=0,
+                 response_schema=None, on_chunk=None, metadata=None):
         if not model.strip():
             callback(None, ProviderError("Choose a model in GDI Settings first."))
             return
@@ -169,6 +193,18 @@ class OllamaProvider(ModelProvider):
                 callback(None, error)
                 return
             try:
+                if metadata is not None and isinstance(payload, dict):
+                    # Ollama reports its own lifecycle timing in the final
+                    # chunk; expose it so cold loads are never blended with
+                    # inference in diagnostics.
+                    if 'load_duration' in payload:
+                        metadata['load_ms'] = round(payload['load_duration'] / 1e6)
+                    if 'prompt_eval_duration' in payload:
+                        metadata['prompt_eval_ms'] = round(payload['prompt_eval_duration'] / 1e6)
+                    if 'eval_duration' in payload:
+                        metadata['eval_ms'] = round(payload['eval_duration'] / 1e6)
+                    if 'eval_count' in payload:
+                        metadata['tokens'] = payload['eval_count']
                 response = _valid_text(''.join(content) if on_chunk else payload['message']['content']).strip()
                 if payload.get('done') is not True:
                     raise ProviderError("The provider returned an incomplete response.")

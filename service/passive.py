@@ -9,6 +9,7 @@ gi.require_version('Atspi', '2.0')
 from gi.repository import Atspi, Gio, GLib
 from quality import candidate, quality
 from prediction import clean_prediction, prediction_source
+from scheduler import PASSIVE, PREDICTION
 
 EVENTS = ('object:text-changed', 'object:text-caret-moved',
           'object:text-selection-changed', 'object:state-changed:focused')
@@ -375,12 +376,31 @@ class PassiveWriting:
             self.generation += 1
             generation = self.generation
             self.cancel = Gio.Cancellable()
+            ticket_holder = {}
+
+            def release_ticket():
+                ticket = ticket_holder.pop('ticket', None)
+                if ticket is not None:
+                    ticket.release()
+
             def completed(response, error):
-                if generation != self.generation: return
+                # The scheduler slot is released first: a superseded request
+                # must never strand it, whatever path the completion takes.
+                release_ticket()
+                if generation != self.generation:
+                    return
+                was_cancelled = self.cancel is not None and self.cancel.is_cancelled()
                 self.cancel = None
                 self.metrics['completed'] += 1
                 self.metrics['latency_ms_total'] += round((time.monotonic() - now) * 1000)
                 if error:
+                    if was_cancelled:
+                        # Cancelled by continued typing or preempted by a
+                        # higher-priority request: unavailability, never a
+                        # provider failure to back off from.
+                        self._trace('request-cancelled')
+                        self.dismiss('cancelled')
+                        return
                     self.metrics['provider_errors'] += 1
                     self.failures += 1
                     self.backoff_until = time.monotonic() + min(60, 15 * self.failures)
@@ -416,12 +436,30 @@ class PassiveWriting:
                 self.emit('PassiveSuggestion', json.dumps({key: data[key] for key in
                     ('token', 'source', 'before', 'after', 'larger', 'anchor', 'tab_safe')}))
                 self.expiry = GLib.timeout_add_seconds(12, lambda: self.dismiss('expired'))
-            try:
-                self._trace('request', model=self.settings.get_string('model-quick-writing'))
-                self.service._router.run_passive(text, self.settings, self.cancel, completed)
-            except Exception as error:
-                self._trace('request-failed', error=type(error).__name__)
-                completed(None, error)
+            def start_passive_request():
+                self.service._last_model_activity = time.monotonic()
+                self.service._residency.note_writing_activity()
+                self.service._residency.observe_request_start(
+                    'quick', self.settings.get_string('model-quick-writing'))
+                try:
+                    self._trace('request', model=self.settings.get_string('model-quick-writing'))
+                    self.service._router.run_passive(text, self.settings, self.cancel,
+                                                     completed,
+                                                     residency=self.service._residency)
+                except Exception as error:
+                    self._trace('request-failed', error=type(error).__name__)
+                    completed(None, error)
+
+            ticket = self.service._scheduler.submit(
+                'passive', PASSIVE, start_passive_request,
+                on_ticket=lambda t: ticket_holder.update(ticket=t))
+            if ticket is None:
+                # Foreground intelligence work owns the model right now; the
+                # correction yields instead of queuing or racing it.
+                self.metrics['yielded_to_foreground'] += 1
+                self._trace('passive-yielded-to-foreground')
+                self.dismiss('busy')
+                return GLib.SOURCE_REMOVE
         except Exception as error:
             self.metrics['capture_error_' + type(error).__name__] += 1
             if token and (not self.offer or self.offer['token'] != token):
@@ -537,8 +575,15 @@ class PassiveWriting:
             generation = self.predict_generation
             self.predict_cancel = Gio.Cancellable()
             started = now
+            predict_ticket_holder = {}
+
+            def release_predict_ticket():
+                ticket = predict_ticket_holder.pop('ticket', None)
+                if ticket is not None:
+                    ticket.release()
 
             def completed(continuation, error):
+                release_predict_ticket()
                 if generation != self.predict_generation:
                     return
                 self.predict_cancel = None
@@ -572,17 +617,34 @@ class PassiveWriting:
                     'anchor': anchor, 'tab_safe': data['tab_safe']}))
                 self.predict_expiry = GLib.timeout_add_seconds(
                     PREDICTION_EXPIRY_SECONDS, lambda: self.dismiss_prediction('expired'))
-            try:
-                self._trace('prediction-request', model=self.settings.get_string('model-quick-writing'),
-                            context_chars=len(source_text))
-                self.service._router.run_prediction(
-                    source=source_text, provider_name=self.settings.get_string('model-provider'),
-                    endpoint=self.settings.get_string('model-endpoint'),
-                    model=self.settings.get_string('model-quick-writing'),
-                    cancellable=self.predict_cancel, callback=completed)
-            except Exception as error:
-                self._trace('prediction-request-failed', error=type(error).__name__)
-                completed(None, error)
+            def start_prediction_request():
+                self.service._last_model_activity = time.monotonic()
+                self.service._residency.note_writing_activity()
+                self.service._residency.observe_request_start(
+                    'quick', self.settings.get_string('model-quick-writing'))
+                try:
+                    self._trace('prediction-request', model=self.settings.get_string('model-quick-writing'),
+                                context_chars=len(source_text))
+                    self.service._router.run_prediction(
+                        source=source_text, provider_name=self.settings.get_string('model-provider'),
+                        endpoint=self.settings.get_string('model-endpoint'),
+                        model=self.settings.get_string('model-quick-writing'),
+                        cancellable=self.predict_cancel, callback=completed,
+                        residency=self.service._residency)
+                except Exception as error:
+                    self._trace('prediction-request-failed', error=type(error).__name__)
+                    completed(None, error)
+
+            ticket = self.service._scheduler.submit(
+                'prediction', PREDICTION, start_prediction_request,
+                on_ticket=lambda t: predict_ticket_holder.update(ticket=t))
+            if ticket is None:
+                # Speculative work never races or queues behind foreground
+                # intelligence: dropped silently, the next pause retries.
+                self.metrics['prediction_yielded_to_foreground'] += 1
+                self._trace('prediction-yielded-to-foreground')
+                self.service._release_context(token)
+                return GLib.SOURCE_REMOVE
         except Exception as error:
             self.metrics['prediction_error_' + type(error).__name__] += 1
             if token and (not self.ghost or self.ghost['token'] != token):

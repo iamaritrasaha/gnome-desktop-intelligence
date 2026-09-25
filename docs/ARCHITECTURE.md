@@ -10,6 +10,8 @@ GNOME Shell (GJS)                      Session service (Python/PyGObject)
   GTK4/libadwaita preferences           providers/: provider contract, Ollama HTTP
            GSettings                    passive.py: opt-in observation, debounce, offers
                                         quality.py: deterministic preflight/output gate
+                                        residency.py: model residency policy, /api/ps observation
+                                        scheduler.py: request priority, preemption, concurrency
                                         learning.py: opt-in SQLite metadata
 ```
 
@@ -26,6 +28,70 @@ missing (`no-accessible-field`, `protected-field`, `no-readable-selection`,
 outcomes for every writing action — supported (preview + guarded Replace),
 readable but not replaceable (preview + Copy with an explanatory note), or
 unavailable (a concise message) — and never a silent no-op.
+
+## Staged launcher search
+
+The palette resolves a query in stages so deterministic work never waits on a
+model and the model never runs while typing:
+
+1. **Immediate (every keystroke, no debounce)** — cached application search,
+   calculator, deterministic action parsing, `search`/`ask`/`find`/`open`
+   prefixes, `history` and the hidden diagnostics command. All of this is
+   in-memory; results render on the same keystroke.
+2. **Async (short debounce)** — the home-directory file scan; its results
+   append to the already-visible app matches.
+3. **Stabilized only** — the small intent-routing model. It is consulted once
+   after the query has stopped changing (350 ms idle), only when deterministic
+   stages left the query unresolved and the query has action-shaped wording.
+   The Ask row is already on screen while it answers; a suggestion only
+   replaces it when one actually fits. Continued typing cancels the pending
+   call, so ordinary typing never triggers model work.
+
+## Model residency and scheduling
+
+`service/residency.py` (`ModelResidencyManager`) owns the model lifecycle.
+Requests never hard-code `keep_alive`: the router asks the manager, which
+decides from the configured `resource-mode` (`low-gpu`, `balanced`,
+`performance`), the calling role (quick/assistant/reasoning, plus the intent
+route) and the model name — identical models across roles share one residency
+entry. Balanced keeps the quick model warm for ~90 s after use (extended,
+bounded, while passive/predictive writing is actively used), the assistant
+model ~45 s, reasoning the shortest useful window. Models expire through
+Ollama's own keep_alive mechanism; GDI never force-unloads anything, so
+models resident because of other applications are untouched.
+
+Prewarming is demand-driven: entering Ask Intelligence calls `PrewarmModel`
+once (the plain launcher, calculator and app launches never touch the
+provider), which loads the assistant model while the question is being typed
+— skipped when it is already resident, disabled in low-gpu mode, and
+rate-limited. `/api/ps` is observed only on lifecycle transitions and when
+diagnostics open (one-shot refreshes, never a polling loop); observations
+feed the developer residency status (`ResidencyStatus`, mirrored in the
+`gdi diagnostics` view) and `RequestStats` records, which split Ollama's
+`load_duration` from evaluation so cold and warm latency stay measurable.
+Task-specific context budgets (prediction and routing use tiny contexts,
+short transformations are capped, Ask keeps the user ceiling) keep KV-cache
+VRAM small.
+
+`service/scheduler.py` (`RequestScheduler`) gives every model request a
+priority — Ask Intelligence (2), explicit Writing Tools and intent routing
+(3), passive correction (4), speculative prediction (5) — and enforces
+one-GPU-friendly behavior: explicit work queues (bounded) instead of racing;
+passive and prediction work never queues, yields immediately when no slot is
+free, and is cancelled the moment a higher-priority request arrives. Cancelled
+or superseded background requests are ordinary unavailability for their
+callers, never provider failures to back off from. With no active requests
+and passive observation off, the session service exits after an idle period
+and returns through D-Bus activation; while passive writing is configured the
+service stays alive because a restarted one would silently lose its
+observation configuration until the next login.
+
+For limited-VRAM machines, `tools/ollama-desktop-profile.sh` offers an
+explicit, reversible systemd drop-in profile for the shared Ollama server
+(`OLLAMA_MAX_LOADED_MODELS=1`, `OLLAMA_NUM_PARALLEL=1`,
+`OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KV_CACHE_TYPE=q8_0`). GDI never modifies
+Ollama configuration on its own; the helper shows the intended change, backs
+up any previous override, requires explicit invocation, and reverts.
 
 ## Deterministic launcher
 

@@ -49,6 +49,16 @@
       <default>1024</default><range min="64" max="4096"/>
       <summary>Maximum generated tokens</summary>
     </key>
+    <key name="resource-mode" type="s">
+      <choices>
+        <choice value="low-gpu"/>
+        <choice value="balanced"/>
+        <choice value="performance"/>
+      </choices>
+      <default>'balanced'</default>
+      <summary>Resource policy for local models</summary>
+      <description>How GDI manages local model residency. Balanced keeps the quick model warm briefly after use, preloads the assistant model only when Ask Intelligence is entered, and runs one model request at a time. Low GPU shortens warm periods and never preloads. Performance keeps models warm longer and allows two concurrent requests. Models always expire on their own; GDI never force-unloads anything.</description>
+    </key>
     <key name="enable-passive-writing" type="b">
       <default>false</default><summary>Passive writing assistance</summary>
       <description>Offer local corrections after a completed sentence and typing pause in supported editable fields.</description>

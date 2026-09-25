@@ -116,6 +116,34 @@ export default class GdiPreferences extends ExtensionPreferences {
     this._addEntry(writing, settings, 'model-assistant', _('Assistant model'));
     this._addEntry(writing, settings, 'model-reasoning', _('Reasoning model'));
 
+    const resource = new Adw.PreferencesGroup({
+      title: _('Resource usage'),
+      description: _('How long local models stay warm after use. Models are only loaded when Intelligence features need them and expire on their own; GDI never unloads models belonging to other applications.'),
+    });
+    aiPage.add(resource);
+    const modeModel = new Gtk.StringList();
+    for (const [value, label] of [
+      ['low-gpu', _('Low GPU · shortest warm periods, no preloading')],
+      ['balanced', _('Balanced · brief warm periods, Ask preloading')],
+      ['performance', _('Performance · longer warm periods')],
+    ])
+      modeModel.append(label);
+    const modeRow = new Adw.ComboRow({ title: _('Resource mode'), model: modeModel });
+    const MODES = ['low-gpu', 'balanced', 'performance'];
+    const applyMode = () => {
+      const current = settings.get_string('resource-mode');
+      const index = Math.max(0, MODES.indexOf(current));
+      modeRow.selected = index;
+    };
+    applyMode();
+    settings.connect('changed::resource-mode', applyMode);
+    modeRow.connect('notify::selected', () => {
+      const value = MODES[modeRow.selected] ?? 'balanced';
+      if (settings.get_string('resource-mode') !== value)
+        settings.set_string('resource-mode', value);
+    });
+    resource.add(modeRow);
+
     const limits = new Adw.PreferencesGroup({ title: _('Request limits') });
     aiPage.add(limits);
     for (const [key, title, lower, upper] of [

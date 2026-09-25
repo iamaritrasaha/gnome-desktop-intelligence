@@ -22,6 +22,8 @@ from history import HistoryStore
 from passive import PassiveWriting
 from pathlib import Path
 from providers.base import ProviderError
+from residency import ModelResidencyManager, QUICK, INTENT, ASSISTANT, REASONING
+from scheduler import RequestScheduler, ASK, WRITING, PASSIVE, PREDICTION
 
 
 BUS_NAME = "org.gnome.DesktopIntelligence1"
@@ -29,6 +31,13 @@ OBJECT_PATH = "/org/gnome/DesktopIntelligence1"
 INTERFACE = "org.gnome.DesktopIntelligence1"
 CONTEXT_LIFETIME_SECONDS = 900
 MAX_CONTEXTS = 8
+# Idle exit: with passive observation off and no requests, the intelligence
+# service may end so nothing stays resident in RAM; D-Bus activation restarts
+# it on demand. Never applies while passive/predictive writing is configured
+# (a restarted service would silently lose the observation configuration
+# until the next login).
+IDLE_EXIT_AFTER_SECONDS = 600
+IDLE_EXIT_CHECK_SECONDS = 60
 
 INTROSPECTION_XML = """
 <node>
@@ -136,6 +145,8 @@ INTROSPECTION_XML = """
       <arg type="s" name="registry" direction="in"/>
       <arg type="s" name="response" direction="out"/>
     </method>
+    <method name="PrewarmModel"><arg type="s" direction="in"/><arg type="b" direction="out"/></method>
+    <method name="ResidencyStatus"><arg type="s" direction="out"/></method>
     <method name="ClearLearning">
       <arg type="b" name="success" direction="out"/>
     </method>
@@ -166,12 +177,23 @@ class GdiService(SelectionContext):
         self._settings = Gio.Settings.new_full(schema_source.lookup('org.gnome.shell.extensions.gdi', False), None, None)
         if not self._settings.get_boolean('retain-learning-examples'):
             self._learning.purge_examples()
+        # One deliberate model lifecycle: residency policy and the request
+        # scheduler are owned here instead of scattered keep_alive values.
+        self._residency = ModelResidencyManager(self._settings, self._router.provider('ollama'))
+        self._scheduler = RequestScheduler(self._residency.max_concurrent())
+        self._resource_mode_id = self._settings.connect(
+            'changed::resource-mode', self._on_resource_mode_changed)
         self._passive = PassiveWriting(self, self._settings, self._emit_passive)
         self._contexts = {}
         self._requests = {}
         self._action_stats = []
         self._route_actions = 0
         self._history = None
+        self._started = time.monotonic()
+        self._last_model_activity = self._started
+        self._request_quit = None
+        self._idle_watch_id = GLib.timeout_add_seconds(
+            IDLE_EXIT_CHECK_SECONDS, self._idle_watch)
         self._owner_signal = connection.signal_subscribe(
             "org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged",
             "/org/freedesktop/DBus", None, Gio.DBusSignalFlags.NONE,
@@ -189,6 +211,32 @@ class GdiService(SelectionContext):
         if self._passive.owner:
             self._connection.emit_signal(self._passive.owner, OBJECT_PATH, INTERFACE, name,
                                          GLib.Variant('(s)', (payload,)))
+
+    def _on_resource_mode_changed(self, _settings, _key):
+        self._residency.set_mode()
+        self._scheduler.set_max_concurrent(self._residency.max_concurrent())
+
+    def _idle_watch(self):
+        """Idle exit. Only when passive/predictive observation is off for this
+        service lifetime, no request is active or queued, and no model work
+        happened recently. D-Bus activation restarts the service on demand;
+        exiting keeps idle RAM at zero. While passive observation is on, the
+        service never exits: a restarted service would silently lose its
+        observation configuration until the next login."""
+        try:
+            if self._passive.owner is not None and (self._passive.enabled or self._passive.predict_enabled):
+                return GLib.SOURCE_CONTINUE
+            if self._requests or self._route_actions:
+                self._last_model_activity = max(self._last_model_activity, time.monotonic() - 1)
+                return GLib.SOURCE_CONTINUE
+            if time.monotonic() - max(self._started, self._last_model_activity) < IDLE_EXIT_AFTER_SECONDS:
+                return GLib.SOURCE_CONTINUE
+        except Exception:
+            return GLib.SOURCE_CONTINUE
+        print('GDI session service idle; exiting until next use', flush=True)
+        if self._request_quit is not None:
+            self._request_quit()
+        return GLib.SOURCE_REMOVE
 
     def _owner_changed(self, _bus, _sender, _path, _interface, _signal, params):
         name, old, new = params.unpack()
@@ -387,8 +435,16 @@ class GdiService(SelectionContext):
                 if self._route_actions >= 2:
                     raise ProviderError('GDI is busy. Try again shortly.')
                 self._route_actions += 1
+                routing_ticket = {}
 
                 def routed(response, error):
+                    # The scheduler slot is released exactly once, whatever
+                    # the routing outcome (reply, error, or vanished client).
+                    ticket = routing_ticket.pop('ticket', None)
+                    if ticket is not None:
+                        self._residency.observe_request_end(
+                            INTENT, self._settings.get_string('model-intent-routing'), {})
+                        ticket.release()
                     self._route_actions = max(0, self._route_actions - 1)
                     try:
                         if error is not None:
@@ -401,17 +457,49 @@ class GdiService(SelectionContext):
                     except Exception:
                         pass  # The client disappeared; nothing to answer.
 
+                def start_routing():
+                    self._last_model_activity = time.monotonic()
+                    self._residency.observe_request_start(INTENT,
+                        self._settings.get_string('model-intent-routing'))
+                    try:
+                        self._router.run_intent_mapping(
+                            question=question, registry=registry_json,
+                            provider_name=self._settings.get_string('model-provider'),
+                            endpoint=self._settings.get_string('model-endpoint'),
+                            model=self._settings.get_string('model-intent-routing'),
+                            cancellable=Gio.Cancellable(), callback=routed,
+                            timeout=min(20, self._settings.get_int('request-timeout')),
+                            residency=self._residency)
+                    except Exception as error:
+                        routed(None, error)
+
+                ticket = self._scheduler.submit('routing', WRITING, start_routing,
+                                                on_ticket=lambda t: routing_ticket.update(ticket=t))
+                if ticket is None:
+                    routed(None, ProviderError('GDI is busy. Try again shortly.'))
+            elif method == 'PrewarmModel':
+                # Demand-driven prewarming: entered Ask Intelligence with the
+                # assistant model cold. Deterministic launcher work never
+                # calls this, so nothing loads for search or app launches.
+                role = args[0] if args[0] in (QUICK, INTENT, ASSISTANT, REASONING) else ASSISTANT
+                started = False
                 try:
-                    self._router.run_intent_mapping(
-                        question=question, registry=registry_json,
-                        provider_name=self._settings.get_string('model-provider'),
-                        endpoint=self._settings.get_string('model-endpoint'),
-                        model=self._settings.get_string('model-intent-routing'),
-                        cancellable=Gio.Cancellable(), callback=routed,
-                        timeout=min(20, self._settings.get_int('request-timeout')))
-                except Exception as error:
-                    self._route_actions = max(0, self._route_actions - 1)
-                    raise
+                    started = self._residency.prewarm(
+                        self._settings.get_string('model-endpoint'), role)
+                except Exception:
+                    started = False
+                invocation.return_value(GLib.Variant('(b)', (started,)))
+            elif method == 'ResidencyStatus':
+                def with_status(status):
+                    try:
+                        invocation.return_value(GLib.Variant('(s)', (json.dumps(status),)))
+                    except Exception:
+                        pass  # The client disappeared; nothing to answer.
+                # Diagnostics open is a documented /api/ps refresh trigger.
+                try:
+                    self._residency.status_then(with_status)
+                except Exception:
+                    with_status(self._residency.status())
             elif method == "GetFocusedContext":
                 self._passive.dismiss('explicit')
                 context = self._capture_focused_context(args[0])
@@ -553,6 +641,10 @@ class GdiService(SelectionContext):
         first_token = None
         route = 'quick' if action in ('proofread', 'rewrite', 'concise', 'expand', 'professional',
                                       'casual', 'friendly', 'direct', 'continue', 'translate') else 'reasoning' if action == 'harder' else 'assistant'
+        role_model = {'quick': quick_model, 'assistant': assistant_model,
+                      'reasoning': reasoning_model}[route]
+        metadata = {}
+
         def chunk(delta):
             nonlocal first_token
             if self._requests.get(token) is not request or cancellable.is_cancelled():
@@ -562,10 +654,17 @@ class GdiService(SelectionContext):
             self._connection.emit_signal(sender, OBJECT_PATH, INTERFACE, 'ResponseChunk',
                 GLib.Variant('(sss)', (token, request_id, delta)))
 
+        def release_ticket():
+            ticket = request.pop('ticket', None)
+            if ticket is not None:
+                self._residency.observe_request_end(route, role_model, metadata)
+                ticket.release()
+
         def completed(response, error):
             if self._requests.get(token) is not request:
                 return
             self._requests.pop(token, None)
+            release_ticket()
             persisted = None
             # Assistant answers land in the local conversation only when the
             # request carried a conversation id and history saving is enabled.
@@ -575,11 +674,19 @@ class GdiService(SelectionContext):
                     persisted = self._history_store().add_message(conversation_id, 'assistant', response)
                 except Exception:
                     persisted = False
+            load_ms = metadata.get('load_ms')
             self._request_stats.append({'action': action, 'route': route,
-                'model': {'quick': quick_model, 'assistant': assistant_model, 'reasoning': reasoning_model}[route],
+                'model': role_model,
                 'first_token_ms': first_token, 'total_ms': round((time.monotonic() - started) * 1000),
                 'question_chars': len(question or ''),
                 'conversation_id': conversation_id or None, 'persisted': persisted,
+                # Cold/warm split comes from Ollama's own load_duration, so
+                # model loading is never blended with inference time.
+                'keep_alive': metadata.get('keep_alive'),
+                'load_ms': load_ms,
+                'cold': load_ms is not None and load_ms > 200,
+                'prompt_eval_ms': metadata.get('prompt_eval_ms'),
+                'eval_ms': metadata.get('eval_ms'),
                 'status': 'error' if error else 'complete'})
             self._request_stats[:] = self._request_stats[-50:]
             if error is not None:
@@ -588,31 +695,45 @@ class GdiService(SelectionContext):
             else:
                 invocation.return_value(GLib.Variant("(s)", (response,)))
 
-        try:
-            preferences = None
-            if self._settings.get_boolean('enable-learning'):
-                try:
-                    preferences = self._learning.stats().get('preferences')
-                except Exception:
-                    pass
-            self._router.run(
-                action=action,
-                selected=selected,
-                context=nearby,
-                question=question,
-                provider_name=provider,
-                endpoint=endpoint,
-                quick_model=quick_model,
-                intent_model=intent_model,
-                assistant_model=assistant_model,
-                reasoning_model=reasoning_model,
-                cancellable=cancellable,
-                callback=completed, timeout=timeout, context_tokens=context_tokens, output_tokens=output_tokens,
-                on_chunk=chunk if request_id and route != 'quick' else None,
-                history=history, preferences=preferences,
-            )
-        except Exception as error:
-            completed(None, error)
+        def start_request():
+            self._last_model_activity = time.monotonic()
+            self._residency.observe_request_start(route, role_model)
+            try:
+                preferences = None
+                if self._settings.get_boolean('enable-learning'):
+                    try:
+                        preferences = self._learning.stats().get('preferences')
+                    except Exception:
+                        pass
+                self._router.run(
+                    action=action,
+                    selected=selected,
+                    context=nearby,
+                    question=question,
+                    provider_name=provider,
+                    endpoint=endpoint,
+                    quick_model=quick_model,
+                    intent_model=intent_model,
+                    assistant_model=assistant_model,
+                    reasoning_model=reasoning_model,
+                    cancellable=cancellable,
+                    callback=completed, timeout=timeout, context_tokens=context_tokens, output_tokens=output_tokens,
+                    on_chunk=chunk if request_id and route != 'quick' else None,
+                    history=history, preferences=preferences,
+                    residency=self._residency, metadata=metadata)
+            except Exception as error:
+                completed(None, error)
+
+        priority = ASK if route in ('assistant', 'reasoning') else WRITING
+        kind = 'ask' if priority == ASK else 'writing'
+        def dropped():
+            # A queued explicit request cancelled before it could start.
+            completed(None, ProviderError('The request was cancelled.'))
+        ticket = self._scheduler.submit(kind, priority, start_request,
+                                        dropped=dropped, cancellable=cancellable,
+                                        on_ticket=lambda t: request.update(ticket=t))
+        if ticket is None:
+            completed(None, ProviderError("GDI is busy. Cancel an existing request first."))
 
     def _cancel_transform(self, token):
         request = self._requests.pop(token, None)
@@ -621,6 +742,12 @@ class GdiService(SelectionContext):
                 self._request_stats.append({'action': request['action'], 'status': 'cancelled',
                     'total_ms': round((time.monotonic() - request['started']) * 1000)})
                 self._request_stats[:] = self._request_stats[-50:]
+            # A queued request is dropped from the scheduler (its slot goes to
+            # the next waiter); a running one is cancelled through its
+            # cancellable and reports the cancellation on its own callback.
+            ticket = request.pop('ticket', None)
+            if ticket is not None:
+                ticket.drop()
             request["cancellable"].cancel()
             request["invocation"].return_dbus_error(
                 f"{INTERFACE}.Error.Cancelled", "Writing request was cancelled.")
@@ -654,6 +781,7 @@ def main():
     connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     service = GdiService(connection)
     loop = GLib.MainLoop()
+    service._request_quit = loop.quit
 
     def on_name_acquired(_connection, _name):
         print("GDI session service ready", flush=True)
@@ -671,6 +799,10 @@ def main():
     try:
         loop.run()
     finally:
+        if service._idle_watch_id:
+            GLib.source_remove(service._idle_watch_id)
+        if service._resource_mode_id:
+            service._settings.disconnect(service._resource_mode_id)
         service._passive.stop()
         service._settings.disconnect(service._passive.settings_handler)
         for token in list(service._contexts):

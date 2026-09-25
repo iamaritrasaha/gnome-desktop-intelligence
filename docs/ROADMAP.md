@@ -64,7 +64,7 @@ identity and Phase 1/2 interactions remain accepted and frozen.
   reference sentence passes offer → accept → replace → undo.
 - [x] Firefox per-field capability matrix measured; webpage selections
   supported read-only; IBus hybrid evaluated and rejected with evidence.
-- [ ] User physical everyday acceptance after the nested validation handoff.
+- [ ] User physical everyday acceptance after nested validation.
 
 GTK4 single-line capture remains excluded. No broader agent automation,
 webview/framework, model training or simulated editing fallback.
@@ -104,8 +104,7 @@ webview/framework, model training or simulated editing fallback.
   regression coverage; end-to-end per-invocation action traces and the hidden
   `gdi diagnostics` view added.
 - [x] Physical everyday acceptance of the action flows on the real desktop
-  (installed 2026-09-25; everyday verification handoff recorded in
-  CURRENT_STATE).
+  (installed 2026-09-25).
 
 ## Phase 5 — Writing Intelligence and Ask UX
 

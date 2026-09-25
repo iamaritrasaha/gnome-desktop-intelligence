@@ -83,4 +83,26 @@ assert normalize_intent_response('{"action": null}') == {'action': '', 'args': {
 assert normalize_intent_response('{"action": "x", "args": [1]}') == {'action': 'x', 'args': {}}
 assert normalize_intent_response('{"action": 5}') == {'action': '', 'args': {}}
 
+# Residency release: when a ModelResidencyManager is supplied, the router asks
+# it for keep_alive instead of hard-coding immediate unload. Direct calls
+# without one keep the legacy 0 for compatibility with existing clients.
+from residency import ModelResidencyManager
+residency = ModelResidencyManager(None, provider=None)
+router.run(action='assistant', selected='', context='', question='Fixture question?',
+           provider_name='ollama', endpoint='http://localhost:11434',
+           quick_model=models['quick'], intent_model=models['intent'],
+           assistant_model=models['assistant'], reasoning_model=models['reasoning'],
+           cancellable=None, callback=lambda *_: None, residency=residency)
+assert recorder.request['keep_alive'] == residency.keep_alive('assistant', models['assistant'])
+assert recorder.request['keep_alive'] > 0
+metadata_sink = {}
+router.run(action='proofread', selected='Static fixture.', context='',
+           question='', provider_name='ollama', endpoint='http://localhost:11434',
+           quick_model=models['quick'], intent_model=models['intent'],
+           assistant_model=models['assistant'], reasoning_model=models['reasoning'],
+           cancellable=None, callback=lambda *_: None, residency=residency,
+           metadata=metadata_sink)
+assert recorder.request['keep_alive'] == residency.keep_alive('quick', models['quick'])
+assert metadata_sink == {}
+
 print('Model defaults, writing routes, keep_alive and action routing: PASS (no models loaded)')

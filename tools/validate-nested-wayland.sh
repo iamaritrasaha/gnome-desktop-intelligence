@@ -20,6 +20,7 @@ python3 "$(dirname "$0")/check-schemas.py" "$extension_dir"
 glib-compile-schemas --strict "$extension_dir/schemas"
 cp "$(dirname "$0")/geometry-regression.js" "$extension_dir/geometry-regression.js"
 cp "$(dirname "$0")/intelligence-regression.js" "$extension_dir/intelligence-regression.js"
+cp "$(dirname "$0")/pointer-regression.js" "$extension_dir/pointer-regression.js"
 python3 "$(dirname "$0")/mock-provider.py" "$test_root/mock-port" &
 mock_pid=$!
 for _ in $(seq 1 30); do test -f "$test_root/mock-port" && break; sleep .1; done
@@ -48,6 +49,15 @@ Icon=application-x-executable
 Terminal=false
 Categories=Utility;
 EOF
+cat > "$applications/gdi-pointer.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=GDI Pointer
+Exec=/usr/bin/touch $test_home/gdi-pointer-launch-confirmed
+Icon=application-x-executable
+Terminal=false
+Categories=Utility;
+EOF
 for number in $(seq 1 8); do
   cat > "$applications/gdi-utility-$number.desktop" <<EOF
 [Desktop Entry]
@@ -67,7 +77,7 @@ import sys
 path = Path(sys.argv[1])
 marker = "    this._updateShortcut();\n  }\n\n  disable()"
 source = path.read_text()
-source = source.replace("import Gio from 'gi://Gio';", "import Gio from 'gi://Gio';\nimport GLib from 'gi://GLib';\nimport {validateGeometry} from './geometry-regression.js';\nimport {validateIntelligence, validateActions} from './intelligence-regression.js';")
+source = source.replace("import Gio from 'gi://Gio';", "import Gio from 'gi://Gio';\nimport GLib from 'gi://GLib';\nimport {validateGeometry} from './geometry-regression.js';\nimport {validateIntelligence, validateActions, validateStress} from './intelligence-regression.js';\nimport {validatePointer} from './pointer-regression.js';")
 probe = r'''    if (global._gdiSmokeProbeStarted)
       return;
     global._gdiSmokeProbeStarted = true;
@@ -89,6 +99,8 @@ probe = r'''    if (global._gdiSmokeProbeStarted)
       await validateGeometry(palette, report);
       await validateIntelligence(palette, report);
       await validateActions(palette, report);
+      await validateStress(palette, report);
+      await validatePointer(palette, report);
       const normalGeometry = palette._calculatePlacement(
         { x: 0, y: 0, width: 1920, height: 1080 }, 400, 32);
       const mediumGeometry = palette._calculatePlacement(
@@ -160,6 +172,9 @@ probe = r'''    if (global._gdiSmokeProbeStarted)
                       palette._items[0].query === 'transformers attention');
                     palette._entry.set_text('GDI');
                     after(180, () => {
+                      // Read the cap before completion: completing an app name
+                      // now re-searches synchronously, replacing the rows.
+                      report('result-limit', palette._items.length === 4);
                       const hadChoices = palette._items.length > 1;
                       palette._moveSelection(1);
                       const selectionMoved = hadChoices && palette._selectedIndex === 1 &&
@@ -169,7 +184,6 @@ probe = r'''    if (global._gdiSmokeProbeStarted)
                         palette._entry.get_text() === selectedName;
                       report('navigation-and-completion-logic',
                         selectionMoved && completed);
-                      report('result-limit', palette._items.length === 4);
                       const resultMonitor = Main.layoutManager.primaryMonitor;
                       const [resultX, resultY] = palette._palette.get_transformed_position();
                       const resultWidth = palette._palette.width;
@@ -273,6 +287,7 @@ export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_CACHE_HOME="$HOME/.cache"
 export DCONF_PROFILE="$test_root/dconf-profile"
 export GDI_TEST_ROOT="$(pwd)"
+export GDI_POINTER_APP_MARKER="$test_home/gdi-pointer-launch-confirmed"
 
 if dbus-run-session -- bash -euo pipefail -c '
   uuid="gdi@gnome.desktop.intelligence"
@@ -321,7 +336,8 @@ if dbus-run-session -- bash -euo pipefail -c '
     exit 1
   fi
 
-  for _attempt in $(seq 1 140); do
+  # Stress + real-pointer probes add well beyond the original window.
+  for _attempt in $(seq 1 400); do
     if rg -q "GDI_TEST probe-complete=true" "$HOME/nested-shell.log"; then
       break
     fi
@@ -496,6 +512,30 @@ for expected in \
   'diagnostics-view-shown=true' \
   'diagnostics-reset-button=true' \
   'diagnostics-reset-clears=true' \
+  'stress-open-close-stable=true' \
+  'stress-final-query-wins=true' \
+  'stress-no-stale-search-rows=true' \
+  'stress-ask-cancel-cleans=true' \
+  'stress-no-stale-result=true' \
+  'stress-service-requests-idle=true' \
+  'stress-no-leaked-request-errors=true' \
+  'pointer-driver-available=true' \
+  'pointer-app-row-visible=true' \
+  'pointer-hover-state=true' \
+  'pointer-click-launches-app=true' \
+  'pointer-click-closes-palette=true' \
+  'pointer-inside-click-keeps-open=true' \
+  'pointer-entry-click-focuses-caret=true' \
+  'pointer-outside-click-dismisses=true' \
+  'pointer-tone-chip-present=true' \
+  'pointer-chip-hover=true' \
+  'pointer-chip-click-expands-tone=true' \
+  'pointer-ask-row-opens-prompt=true' \
+  'pointer-ask-answer-rendered=true' \
+  'pointer-wheel-scrolls-answer=true' \
+  'pointer-copy-click-copies=true' \
+  'pointer-clear-click-returns-to-launcher=true' \
+  'pointer-surface-stable-after-sequence=true' \
   'probe-complete=true'; do
   if ! grep -Fq "GDI_TEST $expected" "$HOME/nested-shell.log"; then
     echo "Nested UI check did not pass: $expected" >&2
