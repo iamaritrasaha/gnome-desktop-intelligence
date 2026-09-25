@@ -152,3 +152,32 @@ single-line capture, IBus-based writing input. Out of scope in Phase 5:
 arbitrary shell execution, model-weight training, cloud providers, telemetry,
 browser automation.
 
+## Phase 5.5 — Clipboard Intelligence
+
+- [x] St-only clipboard access (no xclip/xsel/xdotool, no simulated typing),
+  one-shot reads on explicit GDI interaction only, no background inspection
+  or change monitoring at any layer.
+- [x] Subtle dismissible strip on open — "Clipboard · N characters" with
+  Summarize · Improve · Fix · Explain · Translate · Ask Intelligence chips —
+  that never displaces the launcher workflow, hides itself when result rows
+  take over, shows the length only, and re-probes on the next open.
+- [x] Launcher commands: `clipboard`, `summarize clipboard`,
+  `improve clipboard`, `fix clipboard`, `explain clipboard`,
+  `translate clipboard`, `ask clipboard`, `ask clipboard <question>` —
+  deterministic rows, explicit activation, nothing model-facing before it.
+- [x] Actions reuse the Writing/Ask pipelines end to end (bounded service
+  context, router slots, gates, streaming) and the existing preview/Ask UI
+  with Copy/Retry/Clear; results are transform-and-copy only — no Replace or
+  Insert control, honest read-but-not-replaceable note, Copy result works and
+  refreshes the strip length.
+- [x] Privacy: no persistence, no Intelligence History writes, no diagnostics
+  content, empty/non-text ignored, oversized text refused with its size,
+  models load only after an explicit action.
+- [x] Nested probes: strip shown/length-only/dismiss/return, command rows,
+  fresh-read echo fixture (clipboard changed while open), no Replace control,
+  Copy result, Retry registered-text stale protection, ask command + bare
+  prompt + Escape unwind, empty and oversized explicit errors, provider
+  offline, launcher unaffected, no history; real-pointer coverage for the
+  strip chip, Copy, dismiss button and Hide row.
+- [ ] Physical everyday acceptance on the real desktop (next normal login).
+

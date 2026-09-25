@@ -69,6 +69,10 @@ INTROSPECTION_XML = """
       <arg type="b" name="editable" direction="out"/>
       <arg type="s" name="capabilities" direction="out"/>
     </method>
+    <method name="SetClipboardContext">
+      <arg type="s" name="text" direction="in"/>
+      <arg type="s" name="token" direction="out"/>
+    </method>
     <method name="AcceptPrediction">
       <arg type="s" name="token" direction="in"/>
       <arg type="i" name="words" direction="in"/>
@@ -321,6 +325,37 @@ class GdiService(SelectionContext):
                         context["start"], context["end"], context["caret"], context["editable"],
                         json.dumps(self._capabilities_for(context)),
                     )))
+            elif method == 'SetClipboardContext':
+                # Clipboard Intelligence: the Shell reads the clipboard through
+                # St on the explicit user action and registers the text here so
+                # the established Transform pipeline applies. The text lives in
+                # the same bounded RAM context as a selection snapshot — 15
+                # minute expiry, owner checks, MAX_CONTEXTS pruning — and is
+                # never logged, persisted or diarized. There is no accessible,
+                # so Replace/Undo fail closed by construction.
+                text = args[0]
+                if not isinstance(text, str) or not text.strip():
+                    raise ProviderError('The clipboard does not contain any text.')
+                if len(text) > 12000:
+                    raise ProviderError(
+                        f'The clipboard text is too long ({len(text)} characters). '
+                        "GDI works with up to 12,000.")
+                self._passive.dismiss('explicit')
+                self._prune_contexts()
+                token = secrets.token_urlsafe(24)
+                context = {
+                    "token": token, "selected": text, "nearby": "",
+                    "application": "Clipboard", "role": "clipboard",
+                    "start": -1, "end": -1, "caret": -1,
+                    "created": time.monotonic(), "accessible": None,
+                    "editable": False, "stale": False, "source": "clipboard",
+                    "owner": _sender,
+                    "expiry_id": GLib.timeout_add_seconds(
+                        CONTEXT_LIFETIME_SECONDS,
+                        lambda: self._expire_context(token)),
+                }
+                self._contexts[token] = context
+                invocation.return_value(GLib.Variant('(s)', (token,)))
             elif method == 'AcceptPrediction':
                 if self._passive.owner != _sender: raise ValueError('Passive session belongs to another client')
                 success, message = self._passive.accept_prediction(args[0], args[1])
@@ -609,7 +644,9 @@ class GdiService(SelectionContext):
         context = self._contexts.get(token)
         if context is None:
             raise ProviderError("The selected text context expired. Select the text again.")
-        if require_selection and (context["accessible"] is None or (not context["selected"] and not context.get("insert"))):
+        # Clipboard contexts carry real text with no accessible; empty captures
+        # (no selection, no insertion point) still fail closed here.
+        if require_selection and (not context["selected"] and not context.get("insert")):
             raise ProviderError("GDI could not read a selected text range in this field.")
         return context
 

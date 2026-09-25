@@ -103,6 +103,8 @@ router.run(action='proofread', selected='Static fixture.', context='',
            cancellable=None, callback=lambda *_: None, residency=residency,
            metadata=metadata_sink)
 assert recorder.request['keep_alive'] == residency.keep_alive('quick', models['quick'])
-assert metadata_sink == {}
+# The residency policy records the chosen keep_alive into the request
+# metadata (RequestStats reads it there); the sink carries exactly that.
+assert metadata_sink == {'keep_alive': residency.keep_alive('quick', models['quick'])}
 
 print('Model defaults, writing routes, keep_alive and action routing: PASS (no models loaded)')

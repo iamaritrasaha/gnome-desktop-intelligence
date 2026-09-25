@@ -512,10 +512,52 @@ Rename, Delete and Clear All (two-step) are provided. Closing the palette or
 Clear/New Conversation never deletes stored history.
 
 Diagnostics stay bounded and content-free: `RequestStats` records
-question length, conversation id and persistence status; `PassiveStats`
-gains prediction counters (requests, shown, gate suppressions, staleness,
+question length, conversation id and persistence status; `PassiveStats` gains
+prediction counters (requests, shown, gate suppressions, staleness,
 cancellation, insert refusals, latency) and the stage trace records
 prediction stages with decisions but never text.
+
+## Clipboard Intelligence (explicit, St-only)
+
+The Shell owns every clipboard interaction through `St.Clipboard`
+(`get_default().get_text()`); no xclip/xsel/xdotool, no simulated typing, no
+clipboard change monitoring anywhere, and no service-side clipboard access.
+Reading happens exactly twice per flow: once when the palette opens (launcher
+mode only) to decide whether the subtle strip is shown, and once at the
+moment the user activates a clipboard action — so an open-then-copy sequence
+always acts on the current content, and the strip's length label is refreshed
+by every read. `src/intelligence/ClipboardTools.js` holds the pure,
+node-testable rules: command parsing (`clipboardCommandFor`), the size/empty
+classification (`assessClipboardText`, 12,000-character cap = the selection
+limit) and the clipboard capability snapshot. Only the assessment — usable
+and length — crosses back into the UI; the text itself is not retained by the
+palette between reads.
+
+An activated action registers the text with the service through
+`SetClipboardContext(text)`, which creates an ordinary bounded RAM context
+(`source: "clipboard"`, `application: "Clipboard"`, no accessible,
+15-minute one-shot expiry, owner checks, `MAX_CONTEXTS` pruning). From there
+the request is an ordinary `Transform`/`TransformStream`: the existing
+router slots, task-specific context budgets, literal protection, quality
+gates and streaming all apply unchanged. Replace/Undo fail closed by
+construction (`editable=False`, no accessible), so a clipboard result can
+only be copied; the capability snapshot reports `canReadSelection=true`,
+`canReplaceSelection=false` and the palette renders the
+read-but-not-replaceable note with Copy as the primary outcome. Retry reuses
+the registered context (the text the result is about), never a re-read —
+results always correspond to the text shown in their preview. Clipboard
+Ask interactions never reach Intelligence History: the palette skips
+`HistoryStart` for clipboard contexts, so the service has no conversation to
+persist regardless of the history setting, and learning records only
+action/outcome labels under the synthetic "Clipboard" application name.
+
+Latency: the open-path probe is a single asynchronous St read that renders
+the strip after the palette is already visible; the action path adds one
+clipboard read plus one short D-Bus round trip (both single-digit
+milliseconds) before the model request, which remains the dominant cost.
+Opening the palette, the probe itself and all deterministic launcher work
+never start Ollama, never activate the service for model use, and never
+leave the AI-free path.
 
 ## Phase 4: native action registry, routing and execution
 

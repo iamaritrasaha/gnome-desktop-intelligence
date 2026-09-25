@@ -121,7 +121,7 @@ class PassiveWriting:
         changed = owner != self.owner or pid != self.pid or geometry != self.geometry
         if changed:
             self.dismiss('focus')
-            self.finish_post()
+            self.finish_post('reconfigured')
             self.last_source = None
         self.owner, self.pid, self.geometry = owner, pid, geometry
         self.enabled = bool(passive_enabled and pid > 0 and
@@ -143,7 +143,7 @@ class PassiveWriting:
         self.predict_enabled = False
         self.dismiss('disabled')
         self.dismiss_prediction('disabled')
-        self.finish_post()
+        self.finish_post('disabled')
         if self.listener:
             for event in EVENTS:
                 self.listener.deregister(event)
@@ -208,7 +208,7 @@ class PassiveWriting:
             return
         try:
             if self.service._protected_ancestry(source):
-                self.dismiss('sensitive'); self.dismiss_prediction('sensitive'); self.finish_post(); return
+                self.dismiss('sensitive'); self.dismiss_prediction('sensitive'); self.finish_post('protected'); return
             kind = event.type
             if self.post and source == self.post['accessible']:
                 context = self.service._contexts.get(self.post['token'], {})
@@ -219,7 +219,7 @@ class PassiveWriting:
             if 'focused' in kind:
                 self.dismiss('focus')
                 self.dismiss_prediction('focus')
-                if not event.detail1: self.finish_post()
+                if not event.detail1: self.finish_post('focus-lost')
                 return
             if 'text-changed' in kind:
                 if not self._eligible_cached(source):
@@ -264,7 +264,23 @@ class PassiveWriting:
                 elif self.predict_cancel or self.predict_timer:
                     self.dismiss_prediction('caret')
                 if self.post:
-                    self.finish_post()
+                    # Editing inside the watched range is exactly what the
+                    # accepted-and-edited watch exists to observe: GTK emits a
+                    # caret event per keystroke, so ending the watch on the
+                    # first one would race the text events and fail the final
+                    # verification nondeterministically. The watch ends early
+                    # only on navigation away — a caret elsewhere in the same
+                    # field, an event from another field, or focus loss below —
+                    # and otherwise runs to its bounded 8 s timer.
+                    if source != self.post['accessible']:
+                        self.finish_post('navigated-away')
+                    else:
+                        try:
+                            offset = Atspi.Text.get_caret_offset(self.post['accessible'])
+                        except Exception:
+                            offset = -1
+                        if not self.post['start'] <= offset <= self.post['start'] + 350:
+                            self.finish_post('navigated-away')
         except Exception as error:
             self.metrics['observer_error_' + type(error).__name__] += 1
             self._trace('event-error', error=type(error).__name__)
@@ -379,7 +395,7 @@ class PassiveWriting:
                 # Web editors and single-line focus navigation never take Tab.
                 tab_safe=states.contains(Atspi.StateType.MULTI_LINE) and source.get_application().get_toolkit_name() == 'GTK',
                 learn=learn, retain=learn and self.settings.get_boolean('retain-learning-examples'))
-            self.finish_post()
+            self.finish_post('new-offer')
             self.offer = data
             self.last_source = (source, start, fingerprint)
             self.last_request = now
@@ -740,7 +756,7 @@ class PassiveWriting:
             # undo is recorded as a negative prediction signal.
             # Settle any still-running correction watch first: its outcome and
             # timer must not be overwritten by the prediction's post state.
-            self.finish_post()
+            self.finish_post('prediction-accepted')
             self.post = dict(data, accessible=context['accessible'],
                 start=context['start'], end=context['end'], length=context['length'],
                 edit_end=context['undo_end'], dirty=False, range_uncertain=False,
@@ -819,7 +835,7 @@ class PassiveWriting:
     def dismiss(self, reason='dismissed'):
         self._drop_timer('timer'); self._drop_timer('expiry')
         if reason in ('dismissed', 'explicit'):
-            self.finish_post()
+            self.finish_post('dismissed')
         self.anchor_nonce = self.anchor_cache = None
         self.anchor_feature = None
         self.generation += 1
@@ -901,7 +917,8 @@ class PassiveWriting:
             self.emit('PassiveHidden', 'undo')
         return result, message
 
-    def finish_post(self):
+    def finish_post(self, reason='timer'):
+        self._trace('post-finish', reason=reason)
         self._drop_timer('post_timer')
         data, self.post = self.post, None
         if not data: return GLib.SOURCE_REMOVE

@@ -87,6 +87,14 @@ export function captureCaretContext(pid, kind, callback) {
   call('GetCaretContext', '(is)', [pid, kind], 4000, callback);
 }
 
+/* Clipboard Intelligence: the Shell reads the clipboard through St and
+ * registers the text as a bounded service-side context only when the user
+ * explicitly chooses a clipboard action. The service never reads the
+ * clipboard itself and never logs or persists the text. */
+export function setClipboardContext(text, callback) {
+  call('SetClipboardContext', '(s)', [text], 4000, callback);
+}
+
 export function transform(request, callback) {
   call('Transform', '(sssssssssssiii)', [
     request.token,

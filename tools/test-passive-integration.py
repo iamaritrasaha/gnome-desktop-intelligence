@@ -34,6 +34,19 @@ def wait(predicate, label, timeout=10):
             if result: return result
         except GLib.Error: pass
         time.sleep(.05)
+
+def chord_until(chord_args, predicate, label, timeout=10, attempts=3):
+    # Nested-session key events are occasionally lost under load; the
+    # established runner retransmits the stimulus and requires the designed
+    # outcome. A consumed offer refuses retransmitted chords, so this can
+    # never double-apply an acceptance.
+    for attempt in range(attempts):
+        keyboard.chord(*chord_args)
+        try:
+            wait(predicate, label, timeout)
+            return
+        except AssertionError:
+            if attempt == attempts - 1: raise
     sys.path.insert(0,str(root/'service'))
     from selection import SelectionContext
     Atspi.init()
@@ -76,21 +89,21 @@ try:
     keyboard.text('.')
     completed_at=time.time()
     time.sleep(.35)
-    assert len(calls())==before
+    assert len(calls())==before, ('early', len(calls()), before)
     report('debounce-no-early-request')
     wait(lambda: probe()['passiveVisible'],'suggestion after pause')
-    assert len(calls())==before+1
+    assert len(calls())==before+1, ('offer-without-single-call', len(calls()), before, stats())
     debounce_ms=round((calls()[before]['time']-completed_at)*1000)
     assert 700 <= debounce_ms <= 1800, debounce_ms
     print('GDI_PASSIVE measured_debounce_ms='+str(debounce_ms),flush=True)
     print('OFFER',stats(),probe(),flush=True)
     probe('Visual','(s)',(json.dumps({'state':'capture','name':'phase3-gtk-correction'}),))
-    keyboard.chord(0xff0d,(0xffe3,0xffe9))
-    wait(lambda: fixture('Read')[0]=='This is a useful sentence.','native acceptance')
+    chord_until((0xff0d, (0xffe3, 0xffe9)),
+                lambda: fixture('Read')[0]=='This is a useful sentence.','native acceptance')
     wait(lambda: probe()['passiveUndo'],'undo surface')
     report('safe-shortcut-and-exact-replacement')
-    keyboard.chord(ord('z'),(0xffe3,0xffe9))
-    wait(lambda: fixture('Read')[0]=='This are a useful sentence.','GDI undo')
+    chord_until((ord('z'), (0xffe3, 0xffe9)),
+                lambda: fixture('Read')[0]=='This are a useful sentence.','GDI undo')
     report('safe-undo')
     reset()
     type_sentence('This is a useful sentence.')
@@ -119,11 +132,13 @@ try:
         report(kind+'-field-no-inference')
 
     reset(); type_sentence(); wait(lambda: probe()['passiveVisible'],'Esc offer')
-    token=probe()['passiveToken']; keyboard.chord(0xff1b)
-    wait(lambda: not probe()['passiveVisible'],'Esc dismiss')
-    assert not probe('Passive','(ss)',('AcceptPassive',token))[0]
+    token=probe()['passiveToken']
+    chord_until((0xff1b,), lambda: not probe()['passiveVisible'],'Esc dismiss')
+    assert not probe('Passive','(ss)',('AcceptPassive',token))[0], \
+        (stats(), probe())
     assert fixture('Read')[0]=='This are a useful sentence.'
-    assert json.loads(call('LearningStats')[0])['outcomes'].get('dismissed')==1
+    assert json.loads(call('LearningStats')[0])['outcomes'].get('dismissed')==1, \
+        json.loads(call('LearningStats')[0])
     report('escape-stale-refusal-and-rejection-learning')
 
     reset(); type_sentence(); wait(lambda: probe()['passiveVisible'],'typing offer')
@@ -143,16 +158,15 @@ try:
     report('inflight-cancellation-no-stale-offer')
 
     reset(); type_sentence(); wait(lambda: probe()['passiveVisible'],'caret offer')
-    token=probe()['passiveToken']; keyboard.chord(0xff51)
-    wait(lambda: not probe()['passiveVisible'],'caret dismiss')
+    token=probe()['passiveToken']
+    chord_until((0xff51,), lambda: not probe()['passiveVisible'],'caret dismiss')
     assert not probe('Passive','(ss)',('AcceptPassive',token))[0]
     report('caret-move-invalidates-replacement')
 
     settings.set_boolean('passive-tab-accept',True); Gio.Settings.sync()
     reset(); type_sentence(); wait(lambda: probe()['passiveVisible'],'Tab offer')
     assert 'passive-tab-key' in probe()['passiveBindings']
-    keyboard.chord(0xff09)
-    wait(lambda: fixture('Read')[0]=='This is a useful sentence.','Tab accept')
+    chord_until((0xff09,), lambda: fixture('Read')[0]=='This is a useful sentence.','Tab accept')
     wait(lambda: json.loads(call('LearningStats')[0])['outcomes'].get('accepted_unchanged')==1,'positive learning',12)
     report('opt-in-tab-and-accepted-learning')
     reset('entry'); before=len(calls()); type_sentence(); time.sleep(1.3)
@@ -164,8 +178,8 @@ try:
     settings.set_boolean('retain-learning-examples',True); Gio.Settings.sync()
     reset(); type_sentence('Context stays.\nThis are a useful sentence.')
     wait(lambda: probe()['passiveVisible'],'bounded range offer')
-    keyboard.chord(0xff0d,(0xffe3,0xffe9))
-    wait(lambda: fixture('Read')[0]=='Context stays.\nThis is a useful sentence.','preserve surrounding paragraph')
+    chord_until((0xff0d, (0xffe3, 0xffe9)),
+                lambda: fixture('Read')[0]=='Context stays.\nThis is a useful sentence.','preserve surrounding paragraph')
     time.sleep(.2); keyboard.chord(0xff08); keyboard.text(' today.')
     wait(lambda: json.loads(call('LearningStats')[0])['outcomes'].get('accepted_edited')==1,'edited learning',12)
     assert json.loads(call('LearningStats')[0])['examples']==1, (stats(),json.loads(call('LearningStats')[0]))
@@ -188,18 +202,6 @@ try:
     # --- Predictive writing: pause → ghost text → Tab/Right/Esc ------------
     settings.set_boolean('enable-predictive-writing', True); Gio.Settings.sync()
     wait(lambda: stats().get('prediction_enabled'), 'prediction enabled', 8)
-
-    def chord_until(chord_args, predicate, label, timeout=10, attempts=3):
-        # Nested-session key events are occasionally lost under load; the
-        # established runner retransmits once before diagnosing.
-        for attempt in range(attempts):
-            keyboard.chord(*chord_args)
-            try:
-                wait(predicate, label, timeout)
-                return
-            except AssertionError:
-                if attempt == attempts - 1:
-                    raise
 
     time.sleep(5.2)  # clear the prediction pacing interval
     reset()
@@ -227,8 +229,8 @@ try:
     time.sleep(5.2)
     keyboard.text('Predictive writing keeps the desktop', .01)
     wait(lambda: probe()['passiveVisible'], 'ghost again', 10)
-    keyboard.chord(0xff53)  # Right accepts exactly one word
-    wait(lambda: fixture('Read')[0].endswith('desktop that'), 'one word accepted', 10)
+    chord_until((0xff53,), lambda: fixture('Read')[0].endswith('desktop that'),
+                'one word accepted', 10)  # Right accepts exactly one word
     report('prediction-right-accepts-word')
     wait(lambda: probe()['passiveVisible'], 'remaining ghost re-anchored', 10)
     report('prediction-remainder-reshown')

@@ -40,10 +40,18 @@ import {
   replaceSelection,
   resetActionDiagnostics,
   residencyStatus,
+  setClipboardContext,
   transform,
   streamTransform,
   undoReplacement,
 } from './src/intelligence/ServiceClient.js';
+
+import {
+  CLIPBOARD_CHIP_ACTIONS,
+  assessClipboardText,
+  clipboardCapabilities,
+  clipboardCommandFor,
+} from './src/intelligence/ClipboardTools.js';
 
 import { askQueryRemainder, historyGroups, isResponse, preferAssistant, selectionIntentParts } from './src/intelligence/Presentation.js';
 import { addDiff, addMarkdown, StreamRenderer } from './src/intelligence/ResponseView.js';
@@ -84,6 +92,19 @@ const RANKING_TTL_MS = 30_000;
 
 const WEB_ICON = new Gio.ThemedIcon({name: 'web-browser-symbolic'});
 const CALC_ICON = new Gio.ThemedIcon({name: 'accessories-calculator-symbolic'});
+const CLIPBOARD_PASTE_ICON = 'edit-paste-symbolic';
+const CLIPBOARD_CLOSE_ICON = 'window-close-symbolic';
+
+/* Row names for the typed clipboard commands; the strip chips use the shorter
+ * Writing-Tools-style labels from CLIPBOARD_CHIP_ACTIONS. */
+const CLIPBOARD_ROW_NAMES = {
+  summarize: 'Summarize clipboard',
+  rewrite: 'Improve clipboard',
+  proofread: 'Fix clipboard',
+  explain: 'Explain clipboard',
+  translate: 'Translate clipboard…',
+  ask: 'Ask Intelligence about the clipboard',
+};
 
 /* Developer diagnostics: one line per residency role, e.g.
  * "Quick · warm · 0.8 GB VRAM · expires in 62s". */
@@ -145,6 +166,14 @@ export class LauncherPalette {
     this._conversationId = null;
     this._historyConversation = null;
     this._historyClearArmed = false;
+    // Clipboard Intelligence state: only the length decision is retained —
+    // never the text, which is re-read when an action is explicitly chosen.
+    this._clipboardAvailable = false;
+    this._clipboardLength = 0;
+    this._clipboardDismissed = false;
+    this._clipboardRowsShown = false;
+    this._clipboardNotice = false;
+    this._clipboardGeneration = 0;
     this._motionSettings = new Gio.Settings({
       schema_id: 'org.gnome.desktop.interface',
     });
@@ -225,6 +254,7 @@ export class LauncherPalette {
     });
     this._launcherNote.clutter_text.line_wrap = true;
     this._launcherNote.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+    this._buildClipboardStrip();
 
     this._writingView = new St.BoxLayout({
       name: 'gdi-writing-view',
@@ -274,6 +304,7 @@ export class LauncherPalette {
 
     this._palette.add_child(searchRow);
     this._palette.add_child(this._launcherNote);
+    this._palette.add_child(this._clipboardStrip);
     this._palette.add_child(this._scrollView);
     this._palette.add_child(this._writingView);
     this._overlay.add_child(this._palette);
@@ -347,6 +378,11 @@ export class LauncherPalette {
       this._entry.hint_text = _('Ask, search, or open…');
       this._searchIcon.gicon = this._intelligenceIcon;
       this._showCaptureStatus(context);
+      // Fresh open: dismissal and notices reset, and one async clipboard probe
+      // decides whether the subtle strip is shown. Opening never waits for it.
+      this._clipboardDismissed = false;
+      this._clipboardNotice = false;
+      this._probeClipboard();
     }
     this._positionPalette(monitor);
 
@@ -654,6 +690,13 @@ export class LauncherPalette {
     if (!['launcher', 'writing-actions'].includes(this._mode))
       return;
 
+    // A clipboard error note belongs to the command that produced it; editing
+    // the query acknowledges it. Capture-status notes are unaffected.
+    if (this._clipboardNotice) {
+      this._clipboardNotice = false;
+      this._launcherNote.hide();
+    }
+
     if (this._searchTimeoutId) {
       GLib.source_remove(this._searchTimeoutId);
       this._searchTimeoutId = 0;
@@ -704,6 +747,13 @@ export class LauncherPalette {
     }
     if (/^gdi (?:action )?diagnostics$/i.test(query.trim())) {
       this._showActionDiagnostics();
+      return;
+    }
+    // Clipboard Intelligence commands: deterministic, instant, explicit. The
+    // typed command only proposes a row — the action runs on activation.
+    const clipboardCommand = clipboardCommandFor(query);
+    if (clipboardCommand) {
+      this._handleClipboardCommand(clipboardCommand);
       return;
     }
     const webMatch = query.match(/^search\s+(.+)$/i);
@@ -1115,6 +1165,10 @@ export class LauncherPalette {
     this._items = items.slice(0, limit);
     this._selectedIndex = this._items.length > 0 ? 0 : -1;
     this._results.destroy_all_children();
+    // Clipboard rows replace the strip for the moment (the surface list IS
+    // the clipboard surface); any other result set lets it return.
+    this._clipboardRowsShown = this._items.some(item =>
+      item.type === 'clipboard-action' || item.type === 'clipboard-dismiss');
 
     this._items.forEach((item, index) => {
       const row = new St.Button({
@@ -1187,6 +1241,7 @@ export class LauncherPalette {
 
     this._scrollView.visible = this._items.length > 0;
     this._schedulePosition();
+    this._updateClipboardStrip();
   }
 
   _clearResults() {
@@ -1194,6 +1249,8 @@ export class LauncherPalette {
     this._selectedIndex = -1;
     this._results.destroy_all_children();
     this._scrollView.hide();
+    this._clipboardRowsShown = false;
+    this._updateClipboardStrip();
   }
 
   _stopStream() {
@@ -1271,6 +1328,231 @@ export class LauncherPalette {
       this._schedulePosition();
   }
 
+  /* ---------------------------------------------------------------- */
+  /* Clipboard Intelligence.                                            */
+  /*                                                                    */
+  /* Reading is St-only, one-shot and explicit: a probe per palette      */
+  /* open for the subtle strip, a fresh read at the moment an action     */
+  /* is chosen. No background inspection, no persistence, no history.    */
+  /* ---------------------------------------------------------------- */
+
+  _buildClipboardStrip() {
+    const strip = new St.BoxLayout({
+      name: 'gdi-clipboard-strip',
+      style_class: 'gdi-clipboard-strip',
+      vertical: true,
+      x_expand: true,
+      visible: false,
+    });
+    this._clipboardStrip = strip;
+
+    const header = new St.BoxLayout({
+      style_class: 'gdi-clipboard-header', vertical: false, x_expand: true,
+    });
+    header.add_child(new St.Icon({
+      icon_name: CLIPBOARD_PASTE_ICON, icon_size: 14,
+      style_class: 'gdi-clipboard-icon',
+    }));
+    this._clipboardLabel = new St.Label({
+      style_class: 'gdi-clipboard-label', text: '', x_expand: true,
+      y_align: Clutter.ActorAlign.CENTER,
+    });
+    this._clipboardLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+    header.add_child(this._clipboardLabel);
+    const dismiss = new St.Button({
+      style_class: 'button flat gdi-clipboard-dismiss',
+      can_focus: true,
+      child: new St.Icon({icon_name: CLIPBOARD_CLOSE_ICON, icon_size: 12}),
+    });
+    dismiss.accessible_name = _('Dismiss clipboard suggestions');
+    dismiss.connect('clicked', () => this._dismissClipboardSuggestions());
+    header.add_child(dismiss);
+    strip.add_child(header);
+
+    const chips = new St.BoxLayout({
+      style_class: 'gdi-clipboard-chips', vertical: false, x_expand: true,
+    });
+    this._clipboardChips = chips;
+    for (const item of CLIPBOARD_CHIP_ACTIONS) {
+      const button = new St.Button({
+        style_class: 'button flat gdi-writing-chip',
+        label: _(item.label),
+        can_focus: true,
+      });
+      button.connect('clicked', () =>
+        this._startClipboardFlow(item.key, {prompt: Boolean(item.prompt)}));
+      chips.add_child(button);
+    }
+    strip.add_child(chips);
+  }
+
+  _probeClipboard() {
+    // One-shot read per palette open; the palette never waits for it and no
+    // clipboard change signals or polling exist anywhere. The text itself is
+    // dropped here — only the assessment (usable + length) is kept.
+    const generation = ++this._clipboardGeneration;
+    try {
+      St.Clipboard.get_default().get_text(St.ClipboardType.CLIPBOARD, (clip, text) => {
+        if (!this._isOpen || generation !== this._clipboardGeneration)
+          return;
+        const assessment = assessClipboardText(text);
+        this._clipboardAvailable = assessment.usable;
+        this._clipboardLength = assessment.length ?? 0;
+        this._clipboardLabel.text = assessment.usable
+          ? _('Clipboard · %d characters').format(assessment.length)
+          : '';
+        this._updateClipboardStrip();
+      });
+    } catch (_error) {
+      // A clipboard that cannot be read must never affect the launcher.
+      this._clipboardAvailable = false;
+      this._updateClipboardStrip();
+    }
+  }
+
+  _updateClipboardStrip() {
+    if (!this._clipboardStrip)
+      return;
+    // Tight viewports (compact/short/tiny) keep their full result budget: the
+    // strip is a comfort feature and stays hidden there; the typed clipboard
+    // commands remain available everywhere.
+    const show = Boolean(this._isOpen && this._mode === 'launcher' &&
+      this._viewportMode === 'normal' &&
+      this._clipboardAvailable && !this._clipboardDismissed &&
+      !this._clipboardRowsShown);
+    if (show) {
+      // Large text scales stack the chips instead of clipping them, exactly
+      // like the writing chips.
+      const availableWidth = Math.max(1, this._palette.width - 32);
+      const [, naturalWidth] = this._clipboardChips.get_preferred_width(-1);
+      this._clipboardChips.vertical = naturalWidth > availableWidth;
+    }
+    this._clipboardStrip.visible = show;
+    if (show)
+      this._schedulePosition();
+  }
+
+  _dismissClipboardSuggestions() {
+    // Dismissal covers the current open; the next open re-probes.
+    this._clipboardDismissed = true;
+    this._updateClipboardStrip();
+  }
+
+  _clipboardActionLabel(actionKey) {
+    const item = CLIPBOARD_CHIP_ACTIONS.find(entry => entry.key === actionKey);
+    return _(item ? item.label : 'Clipboard action');
+  }
+
+  _handleClipboardCommand(command) {
+    if (command.kind === 'surface') {
+      const rows = CLIPBOARD_CHIP_ACTIONS.map(item => ({
+        type: 'clipboard-action',
+        actionKey: item.key,
+        prompt: Boolean(item.prompt),
+        name: _(CLIPBOARD_ROW_NAMES[item.key]),
+        icon: this._intelligenceIcon,
+      }));
+      rows.push({
+        type: 'clipboard-dismiss',
+        name: _('Hide clipboard suggestions'),
+        icon: new Gio.ThemedIcon({name: CLIPBOARD_CLOSE_ICON}),
+      });
+      this._setResults(rows, rows.length);
+      return;
+    }
+    const question = command.question ?? '';
+    this._setResults([{
+      type: 'clipboard-action',
+      actionKey: command.actionKey,
+      prompt: ['ask', 'translate'].includes(command.actionKey) && !question,
+      question,
+      name: _(CLIPBOARD_ROW_NAMES[command.actionKey]),
+      icon: this._intelligenceIcon,
+    }]);
+  }
+
+  _startClipboardFlow(actionKey, {prompt = false, question = '', label = null} = {}) {
+    if (!this._isOpen)
+      return;
+    const actionLabel = label ?? this._clipboardActionLabel(actionKey);
+    if ((prompt || ['ask', 'translate'].includes(actionKey)) && !question.trim()) {
+      // Questions and target languages are asked before anything is read or
+      // sent; the strip stays dismissible while the prompt is open.
+      this._writingAction = {key: actionKey, label: actionLabel, clipboard: true};
+      if (actionKey === 'ask')
+        this._prewarmAssistant();
+      this._enterQuestionPrompt(actionKey === 'translate'
+        ? _('Translate the clipboard text into which language?')
+        : _('Ask about the clipboard text…'));
+      return;
+    }
+    this._runClipboardAction(actionKey, question, actionLabel);
+  }
+
+  _runClipboardAction(actionKey, question = '', actionLabel = null) {
+    if (!this._isOpen)
+      return;
+    const generation = this._writingGeneration;
+    const label = actionLabel ?? this._clipboardActionLabel(actionKey);
+    // The clipboard is read again at the moment of the explicit action, so an
+    // open-then-copy sequence always acts on the current content; the strip
+    // length is informational and is refreshed from this read.
+    try {
+      St.Clipboard.get_default().get_text(St.ClipboardType.CLIPBOARD, (clip, text) => {
+        if (!this._isOpen || generation !== this._writingGeneration)
+          return;
+        const assessment = assessClipboardText(text);
+        this._clipboardAvailable = assessment.usable;
+        this._clipboardLength = assessment.length ?? 0;
+        this._clipboardLabel.text = assessment.usable
+          ? _('Clipboard · %d characters').format(assessment.length)
+          : '';
+        if (!assessment.usable) {
+          this._updateClipboardStrip();
+          this._showClipboardNotice(assessment.reason === 'too-large'
+            ? _('The clipboard text is too long (%d characters). GDI works with up to 12,000.').format(assessment.length)
+            : _('The clipboard does not contain any text right now.'));
+          return;
+        }
+        setClipboardContext(text, (reply, error) => {
+          if (!this._isOpen || generation !== this._writingGeneration)
+            return;
+          if (error || !reply?.[0]) {
+            this._showClipboardNotice(error ? errorMessage(error)
+              : _('GDI could not register the clipboard text.'));
+            return;
+          }
+          releaseContext(this._writingContext?.token);
+          this._writingContext = {
+            token: reply[0], selected: text, nearby: '', application: 'Clipboard',
+            role: 'clipboard', start: -1, end: -1, caret: -1, editable: false,
+            capabilities: clipboardCapabilities(), clipboard: true,
+            clipboardLength: assessment.length,
+          };
+          recordSignal(reply[0], actionKey, 'action_selected', this._learningEnabled());
+          this._startWritingRequest({key: actionKey, label}, question);
+        });
+      });
+    } catch (_error) {
+      this._showClipboardNotice(_('The clipboard is unavailable right now.'));
+    }
+  }
+
+  _showClipboardNotice(message) {
+    // Failures are explicit and stay small: back to the launcher with a note,
+    // never a silent no-op and never a dead surface.
+    this._mode = 'launcher';
+    this._writingAction = null;
+    this._entry.hint_text = _('Ask, search, or open…');
+    this._searchIcon.gicon = this._intelligenceIcon;
+    this._clearResults();
+    this._clipboardNotice = true;
+    this._launcherNote.text = message;
+    this._launcherNote.visible = true;
+    this._updateClipboardStrip();
+    this._schedulePosition();
+  }
+
   _resetWritingState() {
     this._stopStream();
     this._stopProcessing();
@@ -1301,6 +1583,7 @@ export class LauncherPalette {
     this._palette.remove_style_class_name('gdi-ai-mode');
     this._entry.hint_text = _('Ask, search, or open…');
     this._searchIcon.gicon = this._intelligenceIcon;
+    this._updateClipboardStrip();
   }
 
   /* ---------------------------------------------------------------- */
@@ -1770,7 +2053,10 @@ export class LauncherPalette {
     // on completion. History stays local, and a failure never blocks the
     // request — it only means the turn is not persisted.
     let conversationId = '';
-    if (isResponse(action.key) && this._historyEnabled()) {
+    // Clipboard Intelligence is transient by design: clipboard-derived
+    // interactions are never written to Intelligence History, whatever the
+    // history setting says.
+    if (isResponse(action.key) && this._historyEnabled() && !this._writingContext?.clipboard) {
       try {
         if (!this._conversationId)
           this._conversationId = await historyStart(this._settings.get_string('model-assistant'));
@@ -1848,6 +2134,16 @@ export class LauncherPalette {
   }
 
   _addContextNotice() {
+    if (this._writingContext?.clipboard) {
+      // Clipboard results always state their source and their limits: GDI
+      // read the clipboard text and can only copy the result back.
+      const length = this._writingContext.clipboardLength ??
+        this._writingContext.selected.length;
+      this._writingContent.add_child(new St.Label({
+        text: _('Using clipboard text (%d characters) · read and copy only').format(length),
+        style_class: 'gdi-context-note'}));
+      return;
+    }
     if (this._writingContext?.selected)
       this._writingContent.add_child(new St.Label({text: _('Using selected text and nearby context'), style_class: 'gdi-context-note'}));
     if (!this._writingContext?.selected && this._writingContext?.editable && this._writingContext.start >= 0)
@@ -2109,6 +2405,10 @@ export class LauncherPalette {
     const copyButton = this._writingControls.get_children().find(button => button.label === _('Copy'));
     if (copyButton)
       copyButton.label = _('Copied');
+    // Copying a clipboard result changes the clipboard: one fresh probe keeps
+    // the strip's length honest (still no content retained).
+    if (this._writingContext?.clipboard)
+      this._probeClipboard();
   }
 
   _learningEnabled() {
@@ -2131,6 +2431,8 @@ export class LauncherPalette {
       return _('Calculator');
     case 'action':
       return _('Action');
+    case 'clipboard-action':
+      return _('Clipboard');
     case 'history-open':
       return '';
     default:
@@ -2165,6 +2467,13 @@ export class LauncherPalette {
         if (this._writingAction?.contextual && !this._writingContext?.token) {
           this._captureThenStart(this._writingAction.key === 'continue' ? 'continue'
             : this._writingAction.scope ?? 'sentence', question);
+          return Clutter.EVENT_STOP;
+        }
+        // Clipboard actions ask their question (or target language) before
+        // anything is read or sent; nothing runs on an empty prompt.
+        if (this._writingAction?.clipboard && !this._writingContext?.token) {
+          this._runClipboardAction(this._writingAction.key, question,
+            this._writingAction.label);
           return Clutter.EVENT_STOP;
         }
         this._startWritingRequest(this._writingAction, question);
@@ -2316,6 +2625,18 @@ export class LauncherPalette {
           this._showHistoryList();
         return Clutter.EVENT_STOP;
       }
+      // A clipboard question prompt unwinds to the launcher with the strip
+      // state intact; nothing was read or sent while the prompt was open.
+      if (this._mode === 'writing-question' && this._writingAction?.clipboard &&
+          !this._writingContext?.token) {
+        this._mode = 'launcher';
+        this._writingAction = null;
+        this._entry.hint_text = _('Ask, search, or open…');
+        this._clearResults();
+        global.stage.set_key_focus(this._entry);
+        this._schedulePosition();
+        return Clutter.EVENT_STOP;
+      }
       if (this._mode === 'writing-question' && this._writingContext?.selected) {
         this._showWritingActions();
         return Clutter.EVENT_STOP;
@@ -2366,6 +2687,19 @@ export class LauncherPalette {
     }
     if (item.type === 'action') {
       this._runActionPlan(item.plan);
+      return;
+    }
+    if (item.type === 'clipboard-action') {
+      this._startClipboardFlow(item.actionKey, {
+        prompt: Boolean(item.prompt),
+        question: item.question ?? '',
+        label: item.name,
+      });
+      return;
+    }
+    if (item.type === 'clipboard-dismiss') {
+      this._dismissClipboardSuggestions();
+      this._clearResults();
       return;
     }
     if (item.type === 'selection-intent') {

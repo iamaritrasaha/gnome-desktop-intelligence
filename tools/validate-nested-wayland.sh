@@ -78,7 +78,7 @@ import sys
 path = Path(sys.argv[1])
 marker = "    this._updateShortcut();\n  }\n\n  disable()"
 source = path.read_text()
-source = source.replace("import Gio from 'gi://Gio';", "import Gio from 'gi://Gio';\nimport GLib from 'gi://GLib';\nimport {validateGeometry} from './geometry-regression.js';\nimport {validateIntelligence, validateActions, validateStress} from './intelligence-regression.js';\nimport {validatePerf} from './perf-regression.js';\nimport {validatePointer} from './pointer-regression.js';")
+source = source.replace("import Gio from 'gi://Gio';", "import Gio from 'gi://Gio';\nimport GLib from 'gi://GLib';\nimport {validateGeometry} from './geometry-regression.js';\nimport {validateIntelligence, validateClipboard, validateActions, validateStress} from './intelligence-regression.js';\nimport {validatePerf} from './perf-regression.js';\nimport {validatePointer} from './pointer-regression.js';")
 probe = r'''    if (global._gdiSmokeProbeStarted)
       return;
     global._gdiSmokeProbeStarted = true;
@@ -99,6 +99,7 @@ probe = r'''    if (global._gdiSmokeProbeStarted)
       (async () => {
       await validateGeometry(palette, report);
       await validateIntelligence(palette, report);
+      await validateClipboard(palette, report);
       await validateActions(palette, report);
       await validateStress(palette, report);
       await validatePerf(palette, () => this._onShortcutPressed(), report);
@@ -132,7 +133,7 @@ probe = r'''    if (global._gdiSmokeProbeStarted)
       const emptyHeight = preferredHeight();
       report('palette-open', palette._isOpen && palette._overlay.visible);
       report('empty-state', palette._items.length === 0 &&
-        palette._palette.get_n_children() === 4);
+        palette._palette.get_n_children() === 5);
       after(250, () => {
         const monitor = Main.layoutManager.primaryMonitor;
         const [x, y] = palette._palette.get_transformed_position();
@@ -584,6 +585,35 @@ for expected in \
   'perf-file-result-under-2000ms=true' \
   'perf-ask-first-delta-under-2500ms=true' \
   'stress-shell-rss-stable=true' \
+  'clipboard-strip-shown=true' \
+  'clipboard-strip-in-launcher-mode=true' \
+  'clipboard-strip-shows-length-only=true' \
+  'clipboard-strip-dismissed=true' \
+  'clipboard-strip-returns-next-open=true' \
+  'clipboard-command-rows=true' \
+  'clipboard-fresh-read-payload=true' \
+  'clipboard-context-note=true' \
+  'clipboard-no-replace-control=true' \
+  'clipboard-capability-note=true' \
+  'clipboard-copy-result=true' \
+  'clipboard-retry-registered-text=true' \
+  'clipboard-ask-command-row=true' \
+  'clipboard-ask-echo=true' \
+  'clipboard-ask-bare-prompt=true' \
+  'clipboard-ask-prompt-echo=true' \
+  'clipboard-ask-escape-to-launcher=true' \
+  'clipboard-empty-no-strip=true' \
+  'clipboard-empty-explicit-error=true' \
+  'clipboard-oversized-no-strip=true' \
+  'clipboard-oversized-explicit-error=true' \
+  'clipboard-provider-offline-visible=true' \
+  'clipboard-launcher-unaffected=true' \
+  'clipboard-history-not-written=true' \
+  'pointer-clipboard-strip-shown=true' \
+  'pointer-clipboard-chip-click-runs=true' \
+  'pointer-clipboard-copy-click-copies=true' \
+  'pointer-clipboard-dismiss-click-hides=true' \
+  'pointer-clipboard-hide-row-click-dismisses=true' \
   'probe-complete=true'; do
   if ! grep -Fq "GDI_TEST $expected" "$HOME/nested-shell.log"; then
     echo "Nested UI check did not pass: $expected" >&2

@@ -720,6 +720,79 @@ export async function validatePointer(palette, report) {
       fixture.force_exit();
       palette.close();
     }
+
+    /* 14. Clipboard Intelligence with real pointer events: the strip chip
+     *     click runs the action on the current clipboard text, Copy really
+     *     copies the result, the dismiss button hides the strip, and the
+     *     command list's Hide row dismisses too. */
+    try {
+      palette._settings.set_string('model-endpoint',
+        `http://127.0.0.1:${GLib.getenv('GDI_MOCK_PORT')}`);
+      St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD,
+        'EchoFixture:PointerClipToken9');
+      await pause(250);
+      palette.open();
+      await pause(400);
+      report('pointer-clipboard-strip-shown', palette._clipboardStrip.visible);
+      const clipChip = palette._clipboardChips.get_children()
+        .find(button => button.label === 'Summarize');
+      if (clipChip && palette._clipboardStrip.visible) {
+        await clickActor(driver, clipChip);
+        const clipResult = await waitFor(() => palette._mode === 'writing-result', 120);
+        report('pointer-clipboard-chip-click-runs', clipResult &&
+          palette._writingSuggestion === 'PointerClipToken9');
+        const copyButton = palette._writingControls.get_children()
+          .find(b => b.label === 'Copy');
+        if (copyButton && clipResult) {
+          await clickActor(driver, copyButton);
+          let copied = false;
+          for (let i = 0; i < 40 && !copied; i++) {
+            await pause(100);
+            copied = (await clipboardText()) === 'PointerClipToken9';
+          }
+          report('pointer-clipboard-copy-click-copies', copied);
+        } else {
+          report('pointer-clipboard-copy-click-copies', false);
+        }
+      } else {
+        report('pointer-clipboard-chip-click-runs', false);
+        report('pointer-clipboard-copy-click-copies', false);
+      }
+      palette.close();
+      await pause(200);
+      palette.open();
+      await pause(400);
+      const clipDismiss = palette._clipboardStrip.get_first_child()?.get_children()
+        .find(child => child.has_style_class_name?.('gdi-clipboard-dismiss'));
+      if (clipDismiss && palette._clipboardStrip.visible) {
+        await clickActor(driver, clipDismiss);
+        await pause(150);
+        report('pointer-clipboard-dismiss-click-hides', !palette._clipboardStrip.visible);
+      } else {
+        report('pointer-clipboard-dismiss-click-hides', false);
+      }
+      // The typed command's Hide row dismisses with a real click too.
+      palette._entry.set_text('clipboard');
+      await waitFor(() => palette._items.length === 7, 60);
+      const hideRow = palette._results.get_children()[6];
+      if (hideRow && palette._items[6]?.type === 'clipboard-dismiss') {
+        await clickActor(driver, hideRow);
+        await pause(150);
+        report('pointer-clipboard-hide-row-click-dismisses', !palette._clipboardStrip.visible);
+      } else {
+        report('pointer-clipboard-hide-row-click-dismisses', false);
+      }
+      St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, ' ');
+      await pause(150);
+    } catch (error) {
+      for (const name of ['pointer-clipboard-strip-shown',
+        'pointer-clipboard-chip-click-runs', 'pointer-clipboard-copy-click-copies',
+        'pointer-clipboard-dismiss-click-hides', 'pointer-clipboard-hide-row-click-dismisses'])
+        report(name, false);
+      console.log('GDI_DEBUG pointer-clipboard-error', String(error.message ?? error));
+    }
+    palette.close();
+    await pause(200);
   } catch (error) {
     report('pointer-probe-error', String(error.message ?? error));
     palette.close();

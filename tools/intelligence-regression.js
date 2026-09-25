@@ -612,3 +612,198 @@ export async function validateStress(palette, report) {
     palette.close();
   }
 }
+
+/* Clipboard Intelligence: the subtle strip, typed commands, the St-only
+ * read-on-explicit-action model, copy, stale protection, empty/oversized
+ * content, provider failure and the transient (no-history) guarantee.
+ * The clipboard is exercised through St itself inside the nested Shell. */
+export async function validateClipboard(palette, report) {
+  const until = async predicate => {
+    for (let i = 0; i < 140; i++) {
+      if (predicate()) return;
+      await pause(50);
+    }
+    throw new Error(`clipboard check timed out in mode ${palette._mode}`);
+  };
+  const bodyText = () => palette._writingContent.get_children()
+    .map(child => child.text ?? '').join('\n');
+  const controlLabels = () => palette._writingControls.get_children()
+    .map(button => button.label);
+  const setClipboard = async text => {
+    St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, text);
+    await pause(200);
+  };
+  const readClipboard = () => new Promise(resolve =>
+    St.Clipboard.get_default().get_text(St.ClipboardType.CLIPBOARD,
+      (_clipboard, text) => resolve(text)));
+  const nativeKey = key => new Promise((resolve, reject) => {
+    const process = Gio.Subprocess.new(['/usr/bin/python3',
+      `${GLib.getenv('GDI_TEST_ROOT')}/tools/press-key.py`, key],
+    Gio.SubprocessFlags.NONE);
+    process.wait_check_async(null, (object, result) => {
+      try { object.wait_check_finish(result); resolve(); } catch (error) { reject(error); }
+    });
+  });
+  /* Fresh open + settle: the one-shot clipboard probe decides the strip a few
+   * milliseconds after open; the pause covers it like the other reopens. */
+  const reopen = async query => {
+    palette.close();
+    await pause(200);
+    palette.open();
+    await pause(400);
+    if (query !== undefined)
+      palette._entry.set_text(query);
+  };
+  const dismissButton = () => palette._clipboardStrip.get_first_child()
+    ?.get_children().find(child => child.has_style_class_name?.('gdi-clipboard-dismiss'));
+
+  palette.close();
+  await pause(200);
+  palette._settings.set_string('model-endpoint',
+    `http://127.0.0.1:${GLib.getenv('GDI_MOCK_PORT')}`);
+
+  const multiline = 'GDI clipboard fixture line one.\n' +
+    'Second line — Ünïcode ✓ and a URL https://example.com/fixture\n';
+  await setClipboard(multiline);
+
+  // 1. Plain open: the subtle strip reports the length, never the text, and
+  //    the launcher mode is untouched.
+  await reopen();
+  report('clipboard-strip-shown', palette._clipboardStrip.visible &&
+    palette._clipboardLabel.text.includes(String(multiline.length)));
+  report('clipboard-strip-in-launcher-mode', palette._mode === 'launcher' &&
+    palette._clipboardChips.get_children().length === 6);
+  // Privacy: the strip reports the length only; no clipboard content is
+  // rendered anywhere in the launcher.
+  report('clipboard-strip-shows-length-only',
+    !palette._clipboardStrip.get_children().some(child =>
+      (child.text ?? '').includes('GDI clipboard fixture')));
+
+  // 2. Dismiss hides it for this open; the next open re-probes and returns it.
+  dismissButton()?.emit('clicked', 1);
+  await pause(120);
+  report('clipboard-strip-dismissed', !palette._clipboardStrip.visible &&
+    palette._mode === 'launcher');
+  await reopen();
+  report('clipboard-strip-returns-next-open', palette._clipboardStrip.visible);
+
+  // 3. The typed command shows the action list instead of the strip.
+  palette._entry.set_text('clipboard');
+  await until(() => palette._items.length === 7 &&
+    palette._items[0]?.type === 'clipboard-action');
+  report('clipboard-command-rows', palette._items[0].name === 'Summarize clipboard' &&
+    palette._items[5].name === 'Ask Intelligence about the clipboard' &&
+    palette._items[6].type === 'clipboard-dismiss' &&
+    !palette._clipboardStrip.visible);
+
+  // 4. Fresh read at action time: the clipboard changes while the palette is
+  //    open, and the echo fixture proves exactly what reached the provider.
+  await setClipboard('EchoFixture:FreshClipToken42');
+  palette._activateItem(0);
+  await until(() => palette._mode === 'writing-result');
+  report('clipboard-fresh-read-payload', palette._writingSuggestion === 'FreshClipToken42');
+  report('clipboard-context-note', bodyText().includes('Using clipboard text') &&
+    bodyText().includes('read and copy only'));
+  report('clipboard-no-replace-control', !controlLabels().some(label =>
+    label.toLowerCase().includes('replace') || label.toLowerCase().includes('insert')));
+  report('clipboard-capability-note', bodyText().includes('read but not replaced'));
+
+  // 5. Copy result really copies, and the strip re-probes afterwards.
+  palette._writingControls.get_children().find(b => b.label === 'Copy')?.emit('clicked', 1);
+  await pause(250);
+  const copied = await readClipboard();
+  report('clipboard-copy-result', copied === 'FreshClipToken42');
+
+  // 6. Stale protection: Retry reuses the registered context — the text the
+  //    result is about — not whatever the clipboard holds meanwhile.
+  palette._writingControls.get_children().find(b => b.label === 'Retry')?.emit('clicked', 1);
+  await until(() => palette._mode === 'writing-result');
+  report('clipboard-retry-registered-text', palette._writingSuggestion === 'FreshClipToken42');
+
+  // 7. Ask with the clipboard as context: only a registered clipboard context
+  //    lets this request pass the service, and the question routes verbatim.
+  await reopen('ask clipboard EchoFixture:ClipboardAskEcho7');
+  await until(() => palette._items[0]?.type === 'clipboard-action');
+  report('clipboard-ask-command-row', palette._items[0].question === 'EchoFixture:ClipboardAskEcho7');
+  palette._activateItem(0);
+  await until(() => palette._mode === 'writing-result');
+  report('clipboard-ask-echo', palette._writingSuggestion === 'ClipboardAskEcho7');
+
+  // 8. Bare 'ask clipboard' enters the question prompt, sends nothing, and
+  //    the real Enter key runs it through the clipboard flow.
+  await reopen('ask clipboard');
+  await until(() => palette._items[0]?.type === 'clipboard-action');
+  palette._activateItem(0);
+  report('clipboard-ask-bare-prompt', palette._mode === 'writing-question');
+  palette._entry.set_text('EchoFixture:ClipboardPromptEcho3');
+  await nativeKey('enter');
+  await until(() => palette._mode === 'writing-result');
+  report('clipboard-ask-prompt-echo', palette._writingSuggestion === 'ClipboardPromptEcho3');
+  palette._writingControls.get_children().find(b => b.label === 'Clear')?.emit('clicked', 1);
+  await pause(150);
+
+  // 9. Escape from the prompt unwinds to the launcher with the strip intact.
+  await reopen('ask clipboard');
+  await until(() => palette._items[0]?.type === 'clipboard-action');
+  palette._activateItem(0);
+  await pause(120);
+  await nativeKey('escape');
+  await pause(150);
+  report('clipboard-ask-escape-to-launcher', palette._mode === 'launcher' &&
+    palette._clipboardStrip.visible);
+
+  // 10. Empty clipboard: no strip, and a chosen action fails explicitly.
+  await setClipboard(' ');
+  await reopen();
+  report('clipboard-empty-no-strip', !palette._clipboardStrip.visible &&
+    !palette._clipboardAvailable && palette._mode === 'launcher');
+  palette._entry.set_text('summarize clipboard');
+  await until(() => palette._items[0]?.type === 'clipboard-action');
+  palette._activateItem(0);
+  await until(() => palette._launcherNote.visible);
+  report('clipboard-empty-explicit-error',
+    palette._launcherNote.text.includes('does not contain any text'));
+
+  // 11. Oversized clipboard: never silently truncated, never offered.
+  await setClipboard('x'.repeat(12500));
+  await reopen();
+  report('clipboard-oversized-no-strip', !palette._clipboardStrip.visible &&
+    !palette._clipboardAvailable);
+  palette._entry.set_text('summarize clipboard');
+  await until(() => palette._items[0]?.type === 'clipboard-action');
+  palette._activateItem(0);
+  await until(() => palette._launcherNote.visible &&
+    palette._launcherNote.text.includes('too long'));
+  report('clipboard-oversized-explicit-error', palette._launcherNote.text.includes('12500'));
+
+  // 12. Provider offline: a chosen clipboard action surfaces the established
+  //     visible error state with Retry, never a silent no-op.
+  await setClipboard('plain text for the offline probe');
+  palette._settings.set_string('model-endpoint', 'http://127.0.0.1:1');
+  await reopen('summarize clipboard');
+  await until(() => palette._items[0]?.type === 'clipboard-action');
+  palette._activateItem(0);
+  await until(() => palette._mode === 'writing-error');
+  report('clipboard-provider-offline-visible',
+    bodyText().length > 0 && controlLabels().includes('Retry'));
+  palette._settings.set_string('model-endpoint',
+    `http://127.0.0.1:${GLib.getenv('GDI_MOCK_PORT')}`);
+
+  // 13. Deterministic launcher is untouched: normal queries keep their rows
+  //     and precedence while clipboard text exists.
+  await reopen('memory usage');
+  await until(() => palette._items[0]?.type === 'action');
+  report('clipboard-launcher-unaffected',
+    palette._items[0].plan?.steps?.[0]?.id === 'system.memoryStatus');
+
+  // 14. Transient by design: clipboard interactions never create history.
+  await reopen('explain clipboard');
+  await until(() => palette._items[0]?.type === 'clipboard-action');
+  palette._activateItem(0);
+  await until(() => palette._mode === 'writing-result');
+  report('clipboard-history-not-written', palette._conversationId === null);
+
+  await setClipboard(' ');
+  palette.close();
+  await pause(200);
+}

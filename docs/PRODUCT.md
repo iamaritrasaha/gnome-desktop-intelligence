@@ -245,6 +245,43 @@ Deterministic behavior is unchanged: apps, files, web search, calculator and
 the Phase 4 action registry outrank everything, and everything works when no
 model is available.
 
+## Phase 5.5 — Clipboard Intelligence
+
+When useful text is already in the clipboard, GDI can work with it directly —
+no selection and no AT-SPI support in the source application is required. The
+feature is deliberately narrow, GNOME-native and read/transform/copy only:
+
+- Opening the palette performs one local, one-shot clipboard probe through
+  GNOME Shell's own St clipboard API (no xclip/xsel/xdotool, no simulated
+  typing, no background monitoring). When non-empty text is found, a subtle
+  strip appears between the search row and the results — "Clipboard ·
+  N characters" with Summarize · Improve · Fix · Explain · Translate · Ask
+  Intelligence chips and a dismiss button. The strip never replaces or
+  displaces the launcher workflow, hides itself whenever result rows take
+  over, and can be dismissed for the current open; the next open re-probes.
+- Empty and non-text clipboard content is ignored. Text beyond 12,000
+  characters (the selection limit) is never offered and never truncated
+  silently; the strip stays away and an explicitly chosen action explains the
+  limit with the actual size.
+- A clipboard action runs only when the user explicitly chooses one — a chip,
+  a typed command row, or Enter on a question prompt. The text is read fresh
+  at that moment, registered as a bounded service-side context (the same
+  RAM-only lifetime as a selection snapshot), and sent through the existing
+  Writing/Ask pipelines into the existing preview/Ask UI with Copy, Retry,
+  Clear and the read-but-not-replaceable note. Copy result is the only way
+  text leaves GDI; Replace and Insert never appear because GDI cannot modify
+  the application the text came from.
+- Launcher commands: `clipboard` (action list), `summarize clipboard`,
+  `improve clipboard`, `fix clipboard`, `explain clipboard`,
+  `translate clipboard`, `ask clipboard` (asks for the question) and
+  `ask clipboard <question>`. All are deterministic launcher rows; nothing
+  reaches a model until one is activated.
+- Privacy: the clipboard is read only on explicit GDI interaction or an
+  explicit clipboard command; between reads the palette retains the length
+  alone; contents are never persisted, never added to Intelligence History,
+  never included in diagnostics or logs, and never inspected continuously.
+  Models load only after the user explicitly chooses an intelligence action.
+
 ## Later phases
 
 Broader system actions beyond the Phase 4 registry, autocomplete prediction and

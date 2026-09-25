@@ -142,25 +142,36 @@ export class PassiveController {
 
   syncFocus() {
     if (this.destroyed) return;
-    this.hide();
-    this.caret = null;
     const focused = global.display.focus_window;
-    if (focused !== this.window) {
-      if (this.window) for (const id of this.windowIds ?? []) this.window.disconnect(id);
-      this.window = focused;
-      this.windowIds = focused ? ['position-changed', 'size-changed'].map(signal =>
-        focused.connect(signal, () => this.syncFocus())) : [];
-    }
+    // Compute the visibility conditions before touching any state.
     const hints = Clutter.InputContentHintFlags;
     const sensitiveInput = Main.inputMethod.currentFocus &&
       (Main.inputMethod.content_purpose === Clutter.InputContentPurpose.PASSWORD ||
        !!(Main.inputMethod.content_hints & (hints.HIDDEN_TEXT | hints.SENSITIVE_DATA)));
-    const visibleField = !sensitiveInput && !this.ibusSensitive && !!this.window &&
+    const visibleField = !sensitiveInput && !this.ibusSensitive && !!focused &&
       !this.suspended && !this.palette.isOpen && !Main.overview.visible && !Main.sessionMode.isLocked;
     const active = visibleField && this.settings.get_boolean('enable-passive-writing');
     const prediction = visibleField && this.settings.get_boolean('enable-predictive-writing');
-    const rect = this.window?.get_frame_rect();
-    this.call('ConfigurePassive', '(bbis)', [active, prediction, this.window?.get_pid() ?? 0,
+    // Nested Wayland can emit duplicate focus/geometry notifications for the
+    // same window. Tearing down the surface for one of those would hide the
+    // offer while the service-side snapshot stays actionable — the inverse
+    // of the "no surface without a live offer" rule. Same window, same
+    // conditions: keep the surface exactly as it is.
+    if (focused && focused === this.window &&
+        active === this._configuredActive && prediction === this._configuredPrediction)
+      return;
+    this.hide();
+    this.caret = null;
+    if (focused !== this.window) {
+      if (this.window) for (const id of this.windowIds ?? []) this.window.disconnect(id);
+      this.windowIds = focused ? ['position-changed', 'size-changed'].map(signal =>
+        focused.connect(signal, () => this.syncFocus())) : [];
+    }
+    this.window = focused;
+    this._configuredActive = active;
+    this._configuredPrediction = prediction;
+    const rect = focused?.get_frame_rect();
+    this.call('ConfigurePassive', '(bbis)', [active, prediction, focused?.get_pid() ?? 0,
       JSON.stringify(rect ? {x: rect.x, y: rect.y, width: rect.width, height: rect.height} : {})]);
   }
 

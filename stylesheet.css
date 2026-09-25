@@ -169,6 +169,15 @@
 .gdi-writing-chip { min-height: 32px; padding: 0 12px; border-radius: 8px; font-size: .92em; }
 .gdi-writing-chip-back { opacity: .75; }
 
+/* Clipboard Intelligence: one subtle strip between the search row and the
+ * results; GNOME supplies all colors, chips reuse the writing-chip styling. */
+.gdi-clipboard-strip { padding: 2px 10px 6px; spacing: 6px; }
+.gdi-clipboard-header { spacing: 8px; }
+.gdi-clipboard-icon { opacity: .72; }
+.gdi-clipboard-label { font-size: .82em; opacity: .72; }
+.gdi-clipboard-chips { spacing: 6px; }
+.gdi-clipboard-dismiss { min-height: 24px; min-width: 24px; padding: 0; border-radius: 6px; opacity: .68; }
+
 /* Ask Intelligence: subdued question line and processing animation. */
 .gdi-ask-question { font-size: .84em; opacity: .68; }
 .gdi-processing { spacing: 6px; padding: 4px 0; opacity: .85; }
