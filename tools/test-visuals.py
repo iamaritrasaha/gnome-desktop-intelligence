@@ -39,7 +39,7 @@ for theme in ('dark', 'light'):
     for scale in (1.0, 1.1):
         prefix = f'{theme}-{scale:g}'
         base = None
-        for state in ('idle', 'search', 'results', 'long', 'ask', 'loading', 'response', 'writing', 'panel'):
+        for state in ('idle', 'search', 'results', 'long', 'ask', 'loading', 'response', 'writing', 'writing-tools', 'history', 'panel'):
             result = visual(state=state, theme=theme, scale=scale, name=f'{prefix}-{state}')
             assert result['theme'] == theme, result
             surface = int(result['surface'][1:3], 16)

@@ -68,7 +68,8 @@ export class PassiveController {
     this.overviewIds = ['showing', 'hidden'].map(signal => Main.overview.connect(signal, () => this.syncFocus()));
     this.lockId = Main.sessionMode.connect('updated', () => this.syncFocus());
     this.settingsId = settings.connect('changed', (_s, key) => {
-      if (key.startsWith('passive-') || key === 'enable-passive-writing') this.syncFocus();
+      if (key.startsWith('passive-') || key === 'enable-passive-writing' ||
+          key === 'enable-predictive-writing') this.syncFocus();
     });
     Gio.bus_get(Gio.BusType.SESSION, null, (_source, result) => {
       if (this.destroyed) {
@@ -123,8 +124,17 @@ export class PassiveController {
     if (!this.settings.get_boolean('enable-passive-writing') || !this.window) return;
     if (!this.applying && GLib.get_monotonic_time() > (this.editSettlesAt ?? 0) &&
         this.caret && (this.caret.x !== rect.x || this.caret.y !== rect.y)) {
-      if (this.data || this.anchorPending) this.call('DismissPassive', '(s)', ['focus']);
-      this.hide();
+      if (this.data?.kind === 'prediction') {
+        // Prediction staleness is the service's decision: it sees the real
+        // AT-SPI caret offset and distinguishes the final typing echo from
+        // navigation. It hides the ghost through PassiveHidden; the input
+        // method's final caret event must not dismiss a fresh ghost here.
+      } else if (this.data || this.anchorPending) {
+        this.call('DismissPassive', '(s)', ['focus']);
+        this.hide();
+      } else {
+        this.hide();
+      }
     }
     this.caret = {x: rect.x, y: rect.y, height: rect.height,
       window: this.window, time: GLib.get_monotonic_time()};
@@ -145,10 +155,12 @@ export class PassiveController {
     const sensitiveInput = Main.inputMethod.currentFocus &&
       (Main.inputMethod.content_purpose === Clutter.InputContentPurpose.PASSWORD ||
        !!(Main.inputMethod.content_hints & (hints.HIDDEN_TEXT | hints.SENSITIVE_DATA)));
-    const active = !sensitiveInput && !this.ibusSensitive && this.settings.get_boolean('enable-passive-writing') && !!this.window &&
+    const visibleField = !sensitiveInput && !this.ibusSensitive && !!this.window &&
       !this.suspended && !this.palette.isOpen && !Main.overview.visible && !Main.sessionMode.isLocked;
+    const active = visibleField && this.settings.get_boolean('enable-passive-writing');
+    const prediction = visibleField && this.settings.get_boolean('enable-predictive-writing');
     const rect = this.window?.get_frame_rect();
-    this.call('ConfigurePassive', '(bis)', [active, this.window?.get_pid() ?? 0,
+    this.call('ConfigurePassive', '(bbis)', [active, prediction, this.window?.get_pid() ?? 0,
       JSON.stringify(rect ? {x: rect.x, y: rect.y, width: rect.width, height: rect.height} : {})]);
   }
 
@@ -162,6 +174,10 @@ export class PassiveController {
   }
 
   show(data) {
+    if (data?.kind === 'prediction')
+      return this.showPrediction(data);
+    if (data?.kind === 'prediction_done')
+      return this.showPredictionDone(data);
     this.hide();
     if (!this.settings.get_boolean('enable-passive-writing') || !this.window ||
         global.display.focus_window !== this.window || this.palette.isOpen || this.suspended ||
@@ -173,6 +189,8 @@ export class PassiveController {
     this.data = data;
     this.undoMode = false;
     this.failed = false;
+    this.header.show();
+    this.controls.show();
     this.heading.text = data.larger ? 'Suggested correction' : 'Writing correction';
     this.text.hide();
     this.diff.destroy_all_children();
@@ -200,6 +218,132 @@ export class PassiveController {
     if (this.palette._animationsEnabled)
       this.actor.ease({opacity: 255, duration: 90, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
     Main.uiGroup.set_child_above_sibling(this.actor, null);
+  }
+
+  /* Predictive writing: subdued ghost text anchored after the caret. The
+   * surface is visibly secondary to typed text and never modifies anything
+   * until the user accepts with Tab, the word key, or Ctrl+Alt+Enter. */
+  _predictionSurfaceVisible() {
+    return this.window && global.display.focus_window === this.window &&
+      !this.palette.isOpen && !this.suspended && !Main.overview.visible &&
+      !Main.sessionMode.isLocked;
+  }
+
+  showPrediction(data) {
+    this.hide();
+    if (!this.settings.get_boolean('enable-predictive-writing') || !this._predictionSurfaceVisible())
+      return;
+    const rect = this.window.get_frame_rect();
+    const monitor = Main.layoutManager.monitors[this.window.get_monitor()];
+    if (!monitor || !data.anchor || data.anchor.x < 0 || data.anchor.y < 0 ||
+        data.anchor.x > rect.width || data.anchor.y > rect.height) return;
+    this.data = data;
+    this.prediction = true;
+    this.undoMode = false;
+    this.failed = false;
+    // A ghost is keyboard-only and minimal: no header row, no buttons. It
+    // must stay visibly secondary to typed text and never cover the field.
+    this.header.hide();
+    this.controls.hide();
+    this.heading.text = 'Continue writing';
+    this.text.hide();
+    this.diff.destroy_all_children();
+    const ghost = new St.Label({style_class: 'gdi-ghost-text', x_expand: true,
+      text: String(data.continuation ?? '').trimStart()});
+    ghost.clutter_text.line_wrap = true;
+    ghost.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+    ghost.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+    this.diff.add_child(ghost);
+    const hintParts = [];
+    if (data.tab_safe) hintParts.push('Tab complete', '→ word');
+    hintParts.push('Esc dismiss');
+    const hint = new St.Label({text: hintParts.join(' · '), style_class: 'gdi-ghost-hint'});
+    this.diff.add_child(hint);
+    this.diff.show();
+    const bound = this.bind('passive-accept-key', () => this.acceptPrediction(0));
+    const tabBound = data.tab_safe && this.bind('passive-tab-key', () => this.acceptPrediction(0));
+    const wordBound = data.tab_safe && this.bind('prediction-word-key', () => this.acceptPrediction(1));
+    this.acceptButton.label = tabBound ? 'Accept · Tab' : bound ? 'Accept · Ctrl+Alt+Enter' : 'Accept';
+    this.bind('passive-dismiss-key', () => this.dismiss());
+    const natural = Math.min(340, Math.max(240,
+      Math.max(this.diff.get_preferred_width(-1)[1],
+        this.header.get_preferred_width(-1)[1], this.controls.get_preferred_width(-1)[1]) + 24));
+    this.actor.width = Math.min(340, monitor.width - 24, natural);
+    const height = this.actor.get_preferred_height(this.actor.width)[1];
+    if (height > Math.min(160, rect.height / 2)) { this.dismiss(); return; }
+    const x = Math.max(monitor.x + 12, Math.min(rect.x + data.anchor.x,
+      monitor.x + monitor.width - this.actor.width - 12));
+    let y = rect.y + data.anchor.y + data.anchor.height + 8;
+    if (y + height > monitor.y + monitor.height - 12) y = rect.y + data.anchor.y - height - 8;
+    if (y < monitor.y + Main.panel.height) { this.dismiss(); return; }
+    this.actor.set_position(Math.round(x), Math.round(y));
+    this.actor.opacity = this.palette._animationsEnabled ? 0 : 255;
+    this.actor.show();
+    if (this.palette._animationsEnabled)
+      this.actor.ease({opacity: 255, duration: 90, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
+    Main.uiGroup.set_child_above_sibling(this.actor, null);
+  }
+
+  showPredictionDone(data) {
+    this.hide();
+    if (!this._predictionSurfaceVisible())
+      return;
+    this.data = data;
+    this.prediction = false;
+    this.undoMode = true;
+    this.failed = false;
+    this.header.show();
+    this.controls.show();
+    this.heading.text = 'Continuation applied';
+    this.diff.hide();
+    this.text.show();
+    this.text.text = 'Undo is available while this text stays unchanged.';
+    this.acceptButton.label = this.bind('passive-undo-key', () => this.accept()) ? 'Undo · Ctrl+Alt+Z' : 'Undo';
+    this.bind('passive-dismiss-key', () => this.dismiss());
+    this.actor.width = 260;
+    const monitor = Main.layoutManager.monitors[this.window.get_monitor()];
+    if (monitor) {
+      const height = this.actor.get_preferred_height(this.actor.width)[1];
+      const rect = this.window.get_frame_rect();
+      const x = Math.max(monitor.x + 12, Math.min(rect.x + rect.width / 2 - this.actor.width / 2,
+        monitor.x + monitor.width - this.actor.width - 12));
+      let y = rect.y + Math.round(rect.height / 2 - height / 2);
+      y = Math.max(monitor.y + Main.panel.height + 8,
+        Math.min(y, monitor.y + monitor.height - height - 12));
+      this.actor.set_position(Math.round(x), Math.round(y));
+    }
+    this.actor.opacity = this.palette._animationsEnabled ? 0 : 255;
+    this.actor.show();
+    if (this.palette._animationsEnabled)
+      this.actor.ease({opacity: 255, duration: 90, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
+    Main.uiGroup.set_child_above_sibling(this.actor, null);
+  }
+
+  acceptPrediction(words) {
+    if (!this.data || this.data.kind !== 'prediction' ||
+        global.display.focus_window !== this.window)
+      return;
+    const token = this.data.token;
+    this.applying = true;
+    this.call('AcceptPrediction', '(si)', [token, words], ([success, message]) => {
+      this.applying = false;
+      this.editSettlesAt = GLib.get_monotonic_time() + 150000;
+      if (this.data?.token !== token)
+        return;
+      if (!success) {
+        this.clearBindings();
+        this.failed = true;
+        this.heading.text = 'Continuation not applied';
+        this.diff.hide();
+        this.text.show();
+        this.text.text = message || 'The text or focus changed. No new text was inserted.';
+        this.acceptButton.label = 'Dismiss';
+        this.bind('passive-dismiss-key', () => this.dismiss());
+        return;
+      }
+      // A full acceptance re-shows this surface as the undo state; a partial
+      // one re-anchors the remaining ghost text from the service.
+    });
   }
 
   accept() {
@@ -247,7 +391,7 @@ export class PassiveController {
     this.disableSent = true;
     try {
       this.bus.call(BUS, PATH, BUS, 'ConfigurePassive',
-        new GLib.Variant('(bis)', [false, 0, '{}']), null,
+        new GLib.Variant('(bbis)', [false, false, 0, '{}']), null,
         Gio.DBusCallFlags.NO_AUTO_START, 5000, null, null);
     } catch { /* The session bus is gone; the service will stop with it. */ }
   }
@@ -255,7 +399,7 @@ export class PassiveController {
     for (const name of this.bindings) Main.wm.removeKeybinding(name);
     this.bindings = [];
   }
-  hide() { this.anchorPending = false; this.undoMode = false; this.failed = false; this.clearBindings(); this.actor.remove_all_transitions(); this.actor.hide(); this.data = null; }
+  hide() { this.anchorPending = false; this.undoMode = false; this.failed = false; this.prediction = false; this.clearBindings(); this.actor.remove_all_transitions(); this.actor.hide(); this.data = null; }
   destroy() {
     this.destroyed = true;
     this._sendDisabled();

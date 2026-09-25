@@ -96,11 +96,53 @@ webview/framework, model training or simulated editing fallback.
   result, failure reason and invalid model tool calls via bounded `ActionStats`.
 - [x] Regression suites: parser/registry unit tests, service RouteAction
   regression on a private bus, nested GNOME 46 action probes.
-- [ ] Physical everyday acceptance of the action flows on the real desktop.
+- [x] Physical everyday acceptance of the action flows on the real desktop
+  (installed 2026-09-25; everyday verification handoff recorded in
+  CURRENT_STATE).
+
+## Phase 5 — Writing Intelligence and Ask UX
+
+- [x] Predictive writing as a distinct capability: pause-triggered short
+  continuations in supported GTK multiline fields, separate from Correct and
+  Rewrite, with its own prompt, quality gate and pacing.
+- [x] Ghost-text surface anchored at the caret: subdued secondary styling,
+  Tab accepts the whole continuation, Right accepts one word, Escape
+  dismisses, typing/caret movement/focus dismissal, stale predictions
+  discarded.
+- [x] Prediction quality gate: echoes, trivial completions, oversized text,
+  commentary, Markdown corruption and protected literals suppressed before
+  display; nothing renders merely because the model produced text.
+- [x] Prediction personalization: acceptance/partial/dismissal/ignored/undo
+  signals extend the existing local learning store (labels only); repeated
+  negatives suppress predictions per application.
+- [x] Writing Tools redesigned as a compact contextual surface: primary
+  actions (Improve, Fix, Shorten, Tone, More…), Tone and More progressive
+  disclosure, contextual caret-scoped actions when nothing is selected,
+  explicit unavailable states instead of silent no-ops.
+- [x] `Continue writing` writing tool (on-demand continuation) with guarded
+  caret insertion, distinct from prediction.
+- [x] Ask Intelligence: fixed 500px width through every state, dynamic height
+  with a work-area-relative maximum, native processing animation instead of
+  raw generating text, buffered streaming Markdown that never flashes raw
+  syntax, completed-block rendering with code copy controls, subdued question
+  display, contextual response actions.
+- [x] Intelligence History: local SQLite conversations with automatic titles,
+  grouped list (Today/Yesterday/Earlier), restore/continue/rename/delete/
+  clear-all, palette command and panel-menu entry, service-side persistence
+  tied to the Save Intelligence History setting.
+- [x] Prediction, Ask and history diagnostics in bounded RAM-only stats
+  (latency, gate decisions, cancellation reasons, persistence status; no
+  content).
+- [x] Test suites: prediction gate/router, history store, writing-menu
+  structure, streaming Markdown hygiene, history grouping, nested probes for
+  the new surfaces, real-typing prediction flow in the passive integration
+  suite.
+- [ ] Physical everyday acceptance: predictive writing feel (trigger rate,
+  acceptance), Writing Tools flow, Ask reading comfort, and history use on
+  the real desktop after the next normal login.
 
 Deferred, not abandoned: Gecko field replacement and passive writing, GTK4
-single-line capture, IBus-based writing input. Out of scope for Phase 4:
-arbitrary shell execution, file deletion, package management, browser
-automation, email/calendar, autonomous background agents, model
-self-modification.
+single-line capture, IBus-based writing input. Out of scope in Phase 5:
+arbitrary shell execution, model-weight training, cloud providers, telemetry,
+browser automation.
 

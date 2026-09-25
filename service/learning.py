@@ -11,6 +11,11 @@ from gi.repository import GLib
 WEIGHTS = {'accepted_unchanged': 3, 'accepted_edited': 1, 'dismissed': -1,
            'continued_typing': -.25, 'immediate_undo': -4}
 
+# Predictive writing uses the same signals table with action='prediction'.
+# Labels only: typed text and continuation text are never stored.
+PREDICTION_WEIGHTS = {'accepted': 3, 'partial': 1, 'dismissed': -1,
+                      'ignored': -.5, 'immediate_undo': -4}
+
 
 class LearningStore:
     def __init__(self, path=None):
@@ -51,6 +56,34 @@ class LearningStore:
             db.execute('INSERT INTO signals(recorded_at,action,signal,application) VALUES(datetime("now"),?,?,?)',
                        (action[:64], signal[:64], application[:128]))
             db.execute('DELETE FROM signals WHERE id NOT IN (SELECT id FROM signals ORDER BY id DESC LIMIT 5000)')
+
+    def record_prediction(self, application, signal):
+        """Prediction outcome labels only: no typed text, no continuation text."""
+        if signal not in PREDICTION_WEIGHTS:
+            return
+        with self.connect() as db:
+            db.execute('INSERT INTO signals(recorded_at,action,signal,application) VALUES(datetime("now"),?,?,?)',
+                       ('prediction', signal, (application or '')[:128]))
+            db.execute('DELETE FROM signals WHERE id NOT IN (SELECT id FROM signals ORDER BY id DESC LIMIT 5000)')
+
+    def allows_prediction(self, application):
+        """Repeatedly ignored predictions stop appearing for this application."""
+        if not os.path.exists(self._path):
+            return True
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT signal FROM signals WHERE action='prediction' AND application=? ORDER BY id DESC LIMIT 8",
+                ((application or '')[:128],)).fetchall()
+        if len(rows) < 5:
+            return True
+        return sum(PREDICTION_WEIGHTS.get(row[0], 0) for row in rows) > -3
+
+    def prediction_stats(self):
+        if not os.path.exists(self._path):
+            return {}
+        with self.connect() as db:
+            return dict(db.execute(
+                "SELECT signal,count(*) FROM signals WHERE action='prediction' GROUP BY signal"))
 
     def pattern(self, category, before, after):
         with self.connect() as db:
@@ -113,6 +146,8 @@ class LearningStore:
                     'categories': {row[0]: {'count': row[1], 'score': row[2]} for row in db.execute('SELECT category,count(*),sum(weight) FROM outcomes GROUP BY category')},
                     'examples': db.execute('SELECT count(*) FROM examples').fetchone()[0],
                     'mean_accepted_word_delta': db.execute('SELECT avg(verbosity_delta) FROM outcomes WHERE weight>0').fetchone()[0],
+                    'predictions': dict(db.execute(
+                        "SELECT signal,count(*) FROM signals WHERE action='prediction' GROUP BY signal")),
                     'preferences': self.preferences(db),
                     'preference': 'preserve wording; suppress repeatedly rejected patterns'}
 

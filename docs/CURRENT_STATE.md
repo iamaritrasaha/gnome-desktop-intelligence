@@ -1,12 +1,151 @@
 # Current state
 
-Updated: 2026-09-25 (Phase 4 — native GNOME actions)
+Updated: 2026-09-25 (Phase 5 — Writing Intelligence, predictive writing, Ask UX/history)
 
-## Phase 4 — native GNOME actions implemented and validated
+## Phase 5 — implemented and validated
+
+This pass added Writing Intelligence's third mode (**Continue**), redesigned
+the Writing Tools presentation, overhauled the Ask Intelligence surface and
+added local conversation history. The Phase 4 action registry, the
+deterministic launcher, all existing writing/passive behavior, the provider
+abstraction, the Intelligence mark and the native GNOME styling are
+unchanged. IBus/browser writing research remains **deferred, not abandoned**.
+
+### What is implemented
+
+- **Predictive writing** (`service/prediction.py`, `service/passive.py`,
+  `PassiveController.js`, off by default): after a 500 ms typing pause in a
+  supported GTK multiline field with the caret at the end of the text and
+  enough context (≥30 chars, ≥6 words, no code markers), the quick model
+  predicts a short continuation with structured output. The deterministic
+  gate suppresses echoes, trivial/one-word completions, >160-char output,
+  commentary, Markdown syntax, JSON, URLs/emails/paths and multi-line
+  answers before display; staleness is re-verified (caret + length
+  unchanged) after generation. The ghost is a compact headerless surface at
+  the caret: Tab (GTK multiline) or Ctrl+Alt+Enter accepts everything,
+  Right accepts one word, Escape dismisses; typing, caret movement and
+  focus changes dismiss. Acceptance uses the guarded caret-range editor with
+  a working Ctrl+Alt+Z undo; the remainder of a partial acceptance stays as
+  re-anchored ghost text. Learning records accepted/partial/dismissed/
+  ignored/immediate-undo labels (no text); repeated negatives suppress
+  predictions for that application. No model call happens per keystroke.
+- **Writing Tools surface**: selection → `Improve / Fix / Shorten / Tone /
+  More…` chips with a subdued selection preview; Tone expands to
+  Professional/Casual/Friendly/Direct; More expands to Expand/Summarize/
+  Explain/Translate/Ask Intelligence. No selection with
+  `canReadCaretContext` → contextual chips (Improve sentence, Continue
+  writing, Fix paragraph, Tone, More…) whose sentence/paragraph capture runs
+  only on the explicit action and fails closed with a visible message. The
+  on-demand **Continue writing** tool inserts its result at the caret via
+  the guarded editor. Choosing an action transforms the same surface into
+  the diff/Markdown preview with Replace primary and Copy/Retry/Cancel;
+  unsupported replacement states keep Copy plus the explanatory note.
+- **Ask Intelligence**: fixed 500 px width and stable top edge through
+  loading, streaming, Markdown, code and follow-ups; content height is
+  dynamic with a work-area-relative maximum and internal scrolling. A
+  native processing animation (mark + three dots, reduced-motion aware)
+  replaces textual generating states; buffered streaming never flashes raw
+  Markdown tokens (completed lines render as blocks, the partial tail stays
+  plain or hidden); completed answers render headings, lists, emphasis,
+  inline code, fenced code blocks (distinct, horizontally scrollable, per-
+  block Copy) and safe links. The question stays subdued above the answer;
+  Copy/Retry/Clear and the follow-up field remain, plus Insert at caret /
+  Replace selection only with a suitable target.
+- **Intelligence History**: service-owned SQLite store
+  (`history.py`, `~/.local/share/gnome-desktop-intelligence/history.sqlite3`)
+  with conversations and messages, automatic titles, bounded housekeeping
+  (200 conversations; messageless rows purged after an hour). The palette's
+  history view (panel menu and the `history` command) groups conversations
+  Today/Yesterday/Earlier and supports open, continue (same conversation
+  id, bounded RAM context rebuilt), rename, delete and two-step Clear All.
+  Persistence is enforced service-side while `save-intelligence-history` is
+  on (default); disabling keeps new interactions temporary and deletes
+  nothing; Preferences offer the switch and Clear Intelligence History.
+  Retry trims the trailing assistant turn; no empty conversation junk is
+  created (user turn stored on submission, assistant turn on completion).
+- **Diagnostics**: `PassiveStats` gains prediction counters (requests,
+  shown, gate suppressions, stale discards, cancellations, insert refusals,
+  latency, acceptance) and prediction stage traces; `RequestStats` records
+  question length, conversation id and persistence status. No content is
+  ever logged.
+
+### Safety and privacy envelope
+
+Predictions only run in the same eligible fields as passive assistance
+(non-secret, editable GTK multiline, public-text attribute checks before
+every read, caret at end of text). Typed text is never stored: the
+prediction learning signals are labels only, and history stores visible Ask
+content and metadata only — never internal prompts, routing metadata,
+hidden reasoning, or provider diagnostics. Password/sensitive fields remain
+excluded from everything. `save-intelligence-history` (default on, per this
+phase's explicit instruction) gates all history writes in the service; Clear
+is always explicit. History is local-only; there is no telemetry.
+
+### Validation performed (2026-09-25)
+
+| Check | Result |
+| --- | --- |
+| `make lint pack` | PASS (strict schemas incl. the two new keys, JS/Python syntax, packaging regressions) |
+| `make test-refinement` | PASS — 43 checks across all prior suites plus `tools/test-prediction.py` (gate decisions, trigger context, structured prediction payload, `continue`/`friendly`/`direct` routes), `tools/test-history.py` (lifecycle, titles, trim, housekeeping, delete/clear, corrupt-DB fail-closed), `tools/test-writing-menu.mjs` (chip structure, Tone/More disclosure, capability gating), extended `test-presentation.mjs` (streaming Markdown hygiene, history grouping) |
+| `tools/validate-nested-wayland.sh` | PASS — 124 GDI_TEST probes true, zero failures: all prior launcher/Ask/writing/action probes plus the new fixed-width (loading/streaming/result), processing-animation, no-token-flash, code-copy, subdued-question, writing-tools chips/Tone/More/preview-transition/preview-diff, contextual caret surface, and full history probes (created → grouped list → restore → continue with same id → delete → armed clear → disabled mode) |
+| `tools/try-phase3.sh --check` | PASS — 30 GDI_PASSIVE probes: the full passive suite (debounce 838 ms, privacy fields, cancellation, learning, provider recovery) plus the real-typing prediction flow (one request per pause, ghost shown with screenshot, Tab full acceptance, Ctrl+Alt+Z undo, Right word acceptance with re-anchored remainder, Escape dismissal, typing-cancels-stale, disable stops requests), idle CPU 0.0% over 10 s, and clean disable/re-enable lifecycle; real apps unchanged (GNOME Text Editor + reference sentence + light/110%, Zenity PASS; Firefox correctly unsupported) |
+| Real models (local Ollama) | `phase5-real-prediction.json`: 5/5 predictions gated and shown on the configured LFM2.5 1.2B quick model, 1150–1186 ms total (mean 1162 ms) per prediction; `test-refinement-models.py` and `test-provider.py --real` PASS unchanged (writing 1.15–1.59 s; Ask first token ~3.0 s on qwen3.5:4b) |
+| Visual light/dark | PASS (`try-phase2.sh --visual`): stable 500 px width, top edge, bottom bounds and hint contrast in dark/light at 100%/110% for all states including the new Writing Tools chips surface and Intelligence History list (screenshots in `build/validation/visual/`) |
+| Nested runtime bugs found and fixed | ConfigurePassive introspection signature mismatch (silently disabled the observer *and* silently broke extension-disable notification), StScrollView.set_child requires an StScrollable (code blocks), stale anchor-request expiry killing fresh ghosts, input-method final caret echo dismissing fresh ghosts, own partial-insert echo dismissing the remainder ghost, unhandled async rejection in Ask requests, service-side prediction dismissal not notifying the Shell |
+| Live session | Not restarted; no logout; nothing installed into the active desktop |
+
+Performance (all measured in the isolated nested sessions; the model numbers
+are single synthetic requests, not a benchmark):
+
+| Measurement | Result |
+| --- | --- |
+| Prediction trigger pacing | one request per typing pause (asserted: a full burst produces exactly one request); 500 ms debounce; 2.5 s minimum interval; typing burst of 45 chars produced zero premature calls |
+| Prediction latency (real LFM2.5 1.2B) | 1150–1186 ms total, mean 1162 ms, 5/5 gated; the ghost never blocks typing (generation is cancellable and the Shell only renders an anchored surface) |
+| Prediction latency (mock) | 151–224 ms gate-to-decision; stale/late predictions discarded (asserted) |
+| Ask first token / total (real qwen3.5:4b) | ~3.0 s / 3.1–3.4 s (unchanged from Phase 3.5) |
+| Writing actions (real LFM2.5) | 1.15–1.59 s (unchanged) |
+| History overhead | SQLite reads only on History use; the store opens lazily; no idle I/O (the 10 s idle window shows zero model calls and 0.0% service CPU) |
+| Service idle CPU | 0.0% over a 10 s window with the observer enabled |
+
+Evidence: `build/validation/nested-phase5-final.log` (and the earlier
+`nested-phase5-run*.log` iteration logs), `shell.log`, `session.log`,
+`atspi.log`, `phase5-passive-run45.log` (plus the `run*.log` iteration logs),
+`phase5-real-prediction.json`, `phase5-visual.log`, `visual/` (including
+`phase5-prediction-ghost.png`, `dark|light-*-writing-tools.png`,
+`dark|light-*-history.png`), `ask-preview.png`, `phase35-markdown.png`,
+`phase35-writing-diff.png`.
+
+### What is intentionally not implemented
+
+- Ghost text inside unsupported targets (browsers, single-line fields):
+  prediction, like passive assistance, only runs where the field is provably
+  safe and observable.
+- Model-weight training, cloud providers, telemetry, history sync.
+- History search/tagging (deliberately not overbuilt this phase).
+- Markdown tables and images remain plain text in Ask rendering (unchanged).
+
+### Exact next task
+
+Physical everyday testing after the next normal login (the active session
+still runs the Phase 4 build; install with `make lint install`). Verify in
+real use: (1) enable **Predictive writing suggestions** and type in GNOME
+Text Editor — a subdued continuation should appear after a pause, Tab
+accepts, Right accepts a word, Escape dismisses; (2) the new Writing Tools
+chips with a selection and the contextual caret actions without one; (3) Ask
+width stability across a long answer, the processing animation, code-block
+Copy; (4) History from the panel menu: ask something, close, reopen history,
+continue the conversation, rename, delete, Clear from Preferences. Report
+any silent failure. Stop at this Phase 5 boundary.
+
+---
+
+## Phase 4 — native GNOME actions implemented and validated (historical)
 
 Phase 4 was explicitly authorized with the constraints: no unrestricted shell
 execution, native APIs only, deterministic-first routing, and the existing
-Writing/Ask/Passive behavior preserved. IBus/browser/system-wide writing
+Writing/Ask/Passive behavior preserved. (Phase 5 above supersedes its
+"exact next task" handoff; the Phase 4 everyday verification happened with
+the 2026-09-25 install.) IBus/browser/system-wide writing
 research is paused and recorded as **deferred, not abandoned** (see the
 Firefox capability matrix below — it remains an accurate measured statement).
 

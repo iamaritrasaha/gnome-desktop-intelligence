@@ -186,6 +186,57 @@ deterministic vs model routing, chosen action, arguments, risk class, latency,
 result and invalid model tool calls; they are inspectable via the service's
 `ActionStats`.
 
+## Phase 5 — Writing Intelligence, predictive writing and Ask history
+
+Writing Intelligence has three separate modes that never share prompts or
+gates: **Correct** (grammar, spelling, punctuation), **Rewrite** (transform
+selected or caret-scoped text) and **Continue** (predict what you are likely
+to write next).
+
+- **Predictive writing** (off by default, General → Writing) offers a short
+  continuation as subdued ghost text near the caret in supported GTK
+  multiline editors after a brief typing pause. It prefers a useful phrase
+  over an obvious next word, fires at most once per pause (never per
+  keystroke), uses the quick model with a small output budget, and discards
+  anything stale, trivial, echoed, oversized, or corrupted with Markdown or
+  commentarial text. Tab accepts the whole continuation, Right accepts one
+  word, Escape dismisses; typing, caret movement and focus changes dismiss
+  it immediately. The insertion is verified and undoable with Ctrl+Alt+Z.
+  Local, inspectable learning records only acceptance labels and can
+  suppress predictions where they are repeatedly ignored.
+- **Writing Tools** become a compact contextual surface. With a selection:
+  Improve, Fix, Shorten, Tone (Professional/Casual/Friendly/Direct) and
+  More… (Expand, Summarize, Explain, Translate, Ask Intelligence) — shown
+  progressively, not all at once. Without a selection, supported fields
+  offer caret-scoped actions (Improve sentence, Continue writing, Fix
+  paragraph, Tone, More…); the sentence or paragraph at the caret is read
+  only when you pick an action. Every outcome is explicit — preview with
+  guarded Replace, preview with Copy where replacement is impossible, or a
+  concise unavailable message.
+- **Ask Intelligence** keeps the 500 px palette with a stable top edge and a
+  fixed width through loading, streaming, Markdown, code blocks and
+  follow-ups. Height is dynamic: short answers stay compact, long answers
+  grow to a sensible work-area maximum and scroll internally. Generation
+  shows a small native processing animation; raw Markdown tokens never flash
+  while streaming, and completed answers render as real formatted content —
+  headings, lists, emphasis, inline code, fenced code blocks (distinct,
+  horizontally scrollable, one-click Copy) and safe links. The question
+  stays subtly visible; Copy, Retry, Clear/New Conversation and a follow-up
+  field accompany the answer. Insert at caret / Replace selection appear
+  only with a suitable captured target.
+- **Intelligence History** (on by default, Privacy → Save Intelligence
+  History) saves completed Ask conversations locally, grouped Today /
+  Yesterday / Earlier in a dedicated view reachable from the panel menu or
+  the `history` command. Conversations open for reading, continue where
+  they left off, and can be renamed, deleted or fully cleared from
+  Preferences. History is entirely local with no telemetry; only visible
+  conversation content and minimal metadata are stored, and turning saving
+  off keeps new interactions temporary without deleting anything.
+
+Deterministic behavior is unchanged: apps, files, web search, calculator and
+the Phase 4 action registry outrank everything, and everything works when no
+model is available.
+
 ## Later phases
 
 Broader system actions beyond the Phase 4 registry, autocomplete prediction and

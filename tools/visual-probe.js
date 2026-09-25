@@ -53,6 +53,27 @@ export async function visual(request) {
         p._writingContext = {token: GLib.uuid_string_random(), selected: '', nearby: '', editable: false};
         p._startWritingRequest({key: 'assistant', label: 'Ask Intelligence'}, 'slow fixture question');
       }
+      if (state === 'writing-tools') {
+        p._writingContext = {token: 'visual-fixture', nearby: '', editable: true,
+          selected: 'The team have reviewed the proposal and we thinks it is ready to share.',
+          capabilities: {canReadSelection: true, canReplaceSelection: true, canInsertText: true}};
+        p._showWritingActions();
+      }
+      if (state === 'history') {
+        p._mode = 'history-list';
+        p._searchRow.hide();
+        p._writingView.show();
+        p._writingScroll.show();
+        p._historyItems = [
+          {id: 'a', title: 'Gradient descent basics', updatedAt: Math.floor(Date.now() / 1000),
+            preview: 'What is gradient descent and how does it minimize a loss?', messageCount: 2},
+          {id: 'b', title: 'Attention scaling', updatedAt: Math.floor(Date.now() / 1000) - 86400 + 3600,
+            preview: 'Why does attention use scaling before softmax?', messageCount: 4},
+          {id: 'c', title: 'Wayland input methods', updatedAt: Math.floor(Date.now() / 1000) - 5 * 86400,
+            preview: 'How do input methods work on Wayland?', messageCount: 6},
+        ];
+        p._renderHistoryRows();
+      }
       if (state === 'response' || state === 'writing') {
         const writing = state === 'writing';
         p._writingContext = {token: '', selected: writing

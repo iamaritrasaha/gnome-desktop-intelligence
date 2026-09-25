@@ -7,7 +7,7 @@ import GLib from 'gi://GLib';
 import Gtk from 'gi://Gtk';
 import { ExtensionPreferences, gettext as _ } from
   'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
-import { clearLearning, errorMessage, providerStatus, learningStats, purgeLearningExamples } from './src/intelligence/ServiceClient.js';
+import { clearLearning, errorMessage, historyClear, providerStatus, learningStats, purgeLearningExamples } from './src/intelligence/ServiceClient.js';
 
 export default class GdiPreferences extends ExtensionPreferences {
   fillPreferencesWindow(window) {
@@ -87,6 +87,12 @@ export default class GdiPreferences extends ExtensionPreferences {
     });
     settings.bind('enable-passive-writing', passive, 'active', Gio.SettingsBindFlags.DEFAULT);
     writingTools.add(passive);
+    const predictive = new Adw.SwitchRow({
+      title: _('Predictive writing suggestions'),
+      subtitle: _('After a typing pause, offer a short continuation as subdued ghost text. Tab accepts it, Right accepts one word, Escape dismisses. Off by default.'),
+    });
+    settings.bind('enable-predictive-writing', predictive, 'active', Gio.SettingsBindFlags.DEFAULT);
+    writingTools.add(predictive);
     const tab = new Adw.SwitchRow({
       title: _('Use Tab for visible corrections'),
       subtitle: _('Optional in supported multiline GTK editors. Temporarily replaces indentation. Ctrl+Alt+Enter remains available.'),
@@ -153,10 +159,37 @@ export default class GdiPreferences extends ExtensionPreferences {
       subtitle: _('Explicit actions send selected text. If passive assistance is enabled, only a completed nearby sentence is sent. Password and sensitive fields are excluded.'),
     }));
     context.add(new Adw.ActionRow({
-      title: _('No saved conversations'),
-      subtitle: _('Ordinary typed text is not saved. Local edit examples require separate consent below.'),
+      title: _('Conversations stay on this computer'),
+      subtitle: _('Ask Intelligence history is local only, never synced, and can be turned off or cleared below.'),
     }));
     privacy.add(context);
+    const history = new Adw.PreferencesGroup({
+      title: _('Intelligence history'),
+      description: _('Completed Ask Intelligence conversations saved in a local database on this computer.'),
+    });
+    privacy.add(history);
+    const historySwitch = new Adw.SwitchRow({
+      title: _('Save Intelligence History'),
+      subtitle: _('New Ask interactions become resumable conversations. Turning this off keeps new interactions temporary; existing history is not deleted.'),
+    });
+    settings.bind('save-intelligence-history', historySwitch, 'active', Gio.SettingsBindFlags.DEFAULT);
+    history.add(historySwitch);
+    const historyPath = GLib.build_filenamev([
+      GLib.get_user_data_dir(), 'gnome-desktop-intelligence', 'history.sqlite3',
+    ]);
+    history.add(new Adw.ActionRow({
+      title: _('History location'),
+      subtitle: historyPath,
+    }));
+    const historyClearRow = new Adw.ActionRow({
+      title: _('Clear Intelligence History'),
+      subtitle: _('Permanently remove every saved Ask Intelligence conversation from this computer.'),
+    });
+    const historyClearButton = new Gtk.Button({label: _('Clear…'), valign: Gtk.Align.CENTER});
+    historyClearRow.add_suffix(historyClearButton);
+    historyClearRow.activatable_widget = historyClearButton;
+    historyClearButton.connect('clicked', () => this._confirmClearHistory(window));
+    history.add(historyClearRow);
     const learning = new Adw.PreferencesGroup({
       title: _('Local learning'),
       description: _('Optional action, application and outcome signals. Text examples require separate consent.'),
@@ -244,6 +277,37 @@ export default class GdiPreferences extends ExtensionPreferences {
     const row = new Adw.EntryRow({ title });
     settings.bind(key, row, 'text', Gio.SettingsBindFlags.DEFAULT);
     group.add(row);
+  }
+
+  _confirmClearHistory(window) {
+    const dialog = new Adw.MessageDialog({
+      transient_for: window,
+      modal: true,
+      heading: _('Clear Intelligence History?'),
+      body: _('This permanently removes all saved Ask Intelligence conversations from the local history database.'),
+    });
+    dialog.add_response('cancel', _('Cancel'));
+    dialog.add_response('clear', _('Clear history'));
+    dialog.set_response_appearance('clear', Adw.ResponseAppearance.DESTRUCTIVE);
+    dialog.set_default_response('cancel');
+    dialog.set_close_response('cancel');
+    dialog.connect('response', (_dialog, response) => {
+      if (response !== 'clear')
+        return;
+      historyClear((reply, error) => {
+        if (error || !reply[0]) {
+          const failure = new Adw.MessageDialog({
+            transient_for: window,
+            modal: true,
+            heading: _('Could not clear Intelligence History'),
+            body: error ? errorMessage(error) : _('The local history database could not be removed.'),
+          });
+          failure.add_response('close', _('Close'));
+          failure.present();
+        }
+      });
+    });
+    dialog.present();
   }
 
   _confirmClear(window) {

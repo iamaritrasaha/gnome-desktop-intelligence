@@ -94,15 +94,20 @@ env GDI_APPS_CHECK="$apps_mode" GDI_FIREFOX_CHECK="$firefox_mode" GDI_PHYSICAL_C
     dbus-update-activation-environment WAYLAND_DISPLAY GDK_BACKEND GTK_A11Y
     sleep 2
     if [ "$GDI_PHYSICAL_CHECK" = 1 ]; then
+      set +e
+      check_status=0
       if [ "$GDI_FIREFOX_CHECK" = 1 ]; then
-        python3 "$GDI_CHECK_ROOT/tools/firefox-capability-matrix.py" "$GDI_CHECK_EXTENSION"
+        python3 "$GDI_CHECK_ROOT/tools/firefox-capability-matrix.py" "$GDI_CHECK_EXTENSION" || check_status=$?
       elif [ "$GDI_APPS_CHECK" != 1 ]; then
-        python3 "$GDI_CHECK_ROOT/tools/test-passive-integration.py" "$GDI_CHECK_EXTENSION"
+        python3 "$GDI_CHECK_ROOT/tools/test-passive-integration.py" "$GDI_CHECK_EXTENSION" || check_status=$?
       fi
       if [ "$GDI_FIREFOX_CHECK" != 1 ]; then
-        python3 "$GDI_CHECK_ROOT/tools/test-passive-apps.py" "$GDI_CHECK_EXTENSION"
+        python3 "$GDI_CHECK_ROOT/tools/test-passive-apps.py" "$GDI_CHECK_EXTENSION" || check_status=$?
       fi
-      exit
+      # Keep the nested Shell log for post-mortem even when a check fails.
+      cp "$HOME/nested-shell.log" "$GDI_CHECK_ROOT/build/validation/physical-shell.log" 2>/dev/null || true
+      set -e
+      exit "$check_status"
     fi
     WAYLAND_DISPLAY="$nested_display" GTK_A11Y=atspi GDK_BACKEND=wayland \
       gnome-text-editor --standalone "$HOME/GDI-writing-sample.txt" &

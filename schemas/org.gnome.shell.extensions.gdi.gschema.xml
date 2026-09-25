@@ -63,6 +63,7 @@
     <key name="passive-tab-key" type="as"><default>['Tab']</default><summary>Optional correction acceptance</summary></key>
     <key name="passive-dismiss-key" type="as"><default>['Escape']</default><summary>Dismiss visible correction</summary></key>
     <key name="passive-undo-key" type="as"><default>['&lt;Control&gt;&lt;Alt&gt;z']</default><summary>Undo current GDI correction</summary></key>
+    <key name="prediction-word-key" type="as"><default>['Right']</default><summary>Accept next predicted word</summary></key>
     <key name="retain-learning-examples" type="b">
       <default>false</default><summary>Save accepted and edited text examples locally</summary>
       <description>Requires personalization. Retain short source, suggestion and final edits for a future local dataset. Turning this off deletes saved examples.</description>
@@ -71,6 +72,16 @@
       <default>false</default>
       <summary>Store local writing signals</summary>
       <description>Store action names and accepted or rejected outcomes locally, without text.</description>
+    </key>
+    <key name="enable-predictive-writing" type="b">
+      <default>false</default>
+      <summary>Predictive writing suggestions</summary>
+      <description>After a typing pause in supported multiline GTK editors, offer a short continuation as subdued ghost text near the caret. Tab accepts it, Right accepts one word, Escape dismisses. Off by default.</description>
+    </key>
+    <key name="save-intelligence-history" type="b">
+      <default>true</default>
+      <summary>Save Intelligence history</summary>
+      <description>Keep completed Ask Intelligence conversations in a local database on this computer. Turning this off keeps new Ask interactions temporary; existing history is only removed through Clear Intelligence History.</description>
     </key>
   </schema>
 </schemalist>

@@ -58,7 +58,10 @@ test-passive: lint
 test-refinement: test-passive
 	node tools/test-actions.mjs
 	node tools/test-presentation.mjs
+	node tools/test-writing-menu.mjs
 	python3 tools/test-writing-refinement.py
+	python3 tools/test-prediction.py
+	python3 tools/test-history.py
 	python3 tools/test-streaming.py
 	python3 tools/test-model-routing.py
 	python3 tools/test-action-service.py

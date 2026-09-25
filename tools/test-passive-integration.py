@@ -185,6 +185,81 @@ try:
     keyboard.chord(0xff1b)
     report('provider-failure-backoff-and-recovery')
 
+    # --- Predictive writing: pause → ghost text → Tab/Right/Esc ------------
+    settings.set_boolean('enable-predictive-writing', True); Gio.Settings.sync()
+    wait(lambda: stats().get('prediction_enabled'), 'prediction enabled', 8)
+
+    def chord_until(chord_args, predicate, label, timeout=10, attempts=3):
+        # Nested-session key events are occasionally lost under load; the
+        # established runner retransmits once before diagnosing.
+        for attempt in range(attempts):
+            keyboard.chord(*chord_args)
+            try:
+                wait(predicate, label, timeout)
+                return
+            except AssertionError:
+                if attempt == attempts - 1:
+                    raise
+
+    time.sleep(5.2)  # clear the prediction pacing interval
+    reset()
+    wait(lambda: stats()['enabled'], 'passive enabled again')
+    before_predictions = stats().get('prediction_requests', 0)
+    keyboard.text('The main reason I prefer this architecture is', .01)
+    # No per-keystroke model calls: the whole typing burst is one request.
+    time.sleep(1.2)
+    assert stats().get('prediction_requests', 0) == before_predictions + 1, stats()
+    report('prediction-one-request-per-pause')
+    wait(lambda: probe()['passiveVisible'], 'ghost surface', 10)
+    report('prediction-ghost-shown')
+    probe('Visual','(s)',(json.dumps({'state':'capture','name':'phase5-prediction-ghost'}),))
+    assert fixture('Read')[0] == 'The main reason I prefer this architecture is'
+    chord_until((0xff09,), lambda: fixture('Read')[0] == 'The main reason I prefer this architecture is'
+                ' that it keeps the model layer separate from the desktop integration.',
+                'Tab accepted full prediction')
+    report('prediction-tab-accepts-full')
+    # The guarded undo watch lives eight seconds; keep each retry inside it.
+    chord_until((ord('z'), (0xffe3, 0xffe9)),
+                lambda: fixture('Read')[0] == 'The main reason I prefer this architecture is',
+                'prediction undo', timeout=4)
+    report('prediction-undo-restores')
+
+    time.sleep(5.2)
+    keyboard.text('Predictive writing keeps the desktop', .01)
+    wait(lambda: probe()['passiveVisible'], 'ghost again', 10)
+    keyboard.chord(0xff53)  # Right accepts exactly one word
+    wait(lambda: fixture('Read')[0].endswith('desktop that'), 'one word accepted', 10)
+    report('prediction-right-accepts-word')
+    wait(lambda: probe()['passiveVisible'], 'remaining ghost re-anchored', 10)
+    report('prediction-remainder-reshown')
+    chord_until((0xff1b,), lambda: not probe()['passiveVisible'], 'Esc dismissed ghost')
+    assert not probe()['passiveBindings']
+    report('prediction-escape-dismisses')
+
+    # Stale prediction: continued typing during generation cancels and the
+    # late result never surfaces.
+    time.sleep(5.2)
+    (mock/'control.json').write_text(json.dumps({'prediction_delay': 1.5}))
+    before_cancel = stats().get('prediction_cancelled', 0)
+    keyboard.text('Late predictions are', .01)
+    wait(lambda: stats().get('prediction_active'), 'slow prediction in flight', 8)
+    keyboard.text(' never shown', .01)
+    wait(lambda: stats().get('prediction_cancelled', 0) == before_cancel + 1, 'in-flight cancelled', 8)
+    time.sleep(2.5)
+    assert not probe()['passiveVisible']
+    assert fixture('Read')[0].endswith('never shown')
+    (mock/'control.json').write_text('{}')
+    report('prediction-typing-cancels-stale')
+
+    settings.set_boolean('enable-predictive-writing', False); Gio.Settings.sync()
+    time.sleep(2.8)
+    disabled_before = stats().get('prediction_requests', 0)
+    keyboard.text('No prediction after disable')
+    time.sleep(1.5)
+    assert stats().get('prediction_requests', 0) == disabled_before
+    assert not probe()['passiveVisible']
+    report('prediction-disable-stops-requests')
+
     # Idle CPU is process CPU time, not wall time; no periodic accessibility scans.
     owner=bus.call_sync('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus',
         'GetConnectionUnixProcessID',GLib.Variant('(s)',('org.gnome.DesktopIntelligence1',)),None,Gio.DBusCallFlags.NONE,5000,None).unpack()[0]
@@ -210,4 +285,5 @@ try:
     (project/'build/validation/phase3-metrics.json').write_text(json.dumps(dict(stats(), idle_cpu_percent=cpu_percent, model_calls=len(calls()), measured_debounce_ms=debounce_ms),indent=2))
 finally:
     settings.set_boolean('enable-passive-writing',False); Gio.Settings.sync()
+    settings.set_boolean('enable-predictive-writing',False); Gio.Settings.sync()
     keyboard.close(); process.terminate(); process.wait(timeout=5)

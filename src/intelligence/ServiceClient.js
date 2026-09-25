@@ -41,8 +41,27 @@ function call(method, signature, args, timeout, callback, flags = Gio.DBusCallFl
   });
 }
 
+function callAsync(method, signature, args, timeout, flags = Gio.DBusCallFlags.NONE) {
+  return new Promise((resolve, reject) => {
+    call(method, signature, args, timeout, (reply, error) => {
+      if (error) reject(error);
+      else resolve(reply);
+    }, flags);
+  });
+}
+
 export function captureFocusedContext(pid, callback) {
   call('GetFocusedContext', '(i)', [pid], 3000, callback);
+}
+
+/* Explicit no-selection capture: the bounded sentence or paragraph at the
+ * caret in a supported field, captured only when the user picks an action. */
+export function captureCaretContext(pid, kind, callback) {
+  call('GetCaretContext', '(is)', [pid, kind], 4000, callback);
+}
+
+export function acceptPrediction(token, words, callback) {
+  call('AcceptPrediction', '(si)', [token, words], 5000, callback);
 }
 
 export function transform(request, callback) {
@@ -103,6 +122,40 @@ export function recordSignal(token, action, signal, learningEnabled) {
 
 export function clearLearning(callback) {
   call('ClearLearning', '()', [], 5000, callback);
+}
+
+/* Intelligence history: local conversations owned by the service. Writes are
+ * no-ops at the service while save-intelligence-history is disabled. */
+export function historyStart(model) {
+  return callAsync('HistoryStart', '(s)', [model ?? ''], 5000).then(reply => reply[0]);
+}
+
+export function historyAdd(conversationId, role, content) {
+  return callAsync('HistoryAdd', '(sss)', [conversationId, role, content], 5000);
+}
+
+export function historyTrim(conversationId, role) {
+  return callAsync('HistoryTrim', '(ss)', [conversationId, role], 5000);
+}
+
+export function historyList() {
+  return callAsync('HistoryList', '()', [], 5000).then(reply => JSON.parse(reply[0]));
+}
+
+export function historyGet(conversationId) {
+  return callAsync('HistoryGet', '(s)', [conversationId], 5000).then(reply => JSON.parse(reply[0]));
+}
+
+export function historyRename(conversationId, title) {
+  return callAsync('HistoryRename', '(ss)', [conversationId, title], 5000);
+}
+
+export function historyDelete(conversationId) {
+  return callAsync('HistoryDelete', '(s)', [conversationId], 5000);
+}
+
+export function historyClear(callback) {
+  call('HistoryClear', '()', [], 5000, callback);
 }
 
 export function errorMessage(error) {
@@ -177,11 +230,11 @@ export function streamTransform(request, onChunk, callback) {
         const [token, id, delta] = params.deep_unpack();
         if (!disposed && token === request.token && id === requestId) onChunk(delta);
       });
-    bus.call(BUS_NAME, OBJECT_PATH, INTERFACE, 'TransformStream', new GLib.Variant('(sssssssssssiiiss)', [request.token, request.action,
+    bus.call(BUS_NAME, OBJECT_PATH, INTERFACE, 'TransformStream', new GLib.Variant('(sssssssssssiiisss)', [request.token, request.action,
       request.selected, request.nearby, request.question, request.provider, request.endpoint,
       request.quickModel, request.intentModel, request.assistantModel, request.reasoningModel,
       request.timeout, request.contextTokens, request.outputTokens, requestId,
-      JSON.stringify(request.history ?? [])]), null, Gio.DBusCallFlags.NONE, (request.timeout + 10) * 1000, null, (connection, result) => {
+      JSON.stringify(request.history ?? []), request.conversationId ?? '']), null, Gio.DBusCallFlags.NONE, (request.timeout + 10) * 1000, null, (connection, result) => {
         if (disposed) return;
         dispose();
         let reply;

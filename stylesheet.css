@@ -167,3 +167,32 @@
 .gdi-response-link { padding: 4px 0; font-size: .85em; }
 .gdi-followup { margin: 2px 8px 6px; }
 .gdi-context-note { font-size: .8em; opacity: .7; }
+
+/* Phase 5: compact contextual Writing Tools surface. */
+.gdi-writing-preview { font-size: .88em; opacity: .72; font-style: italic; }
+.gdi-writing-chip { min-height: 32px; padding: 0 12px; border-radius: 8px; font-size: .92em; }
+.gdi-writing-chip-back { opacity: .75; }
+
+/* Ask Intelligence: subdued question line and processing animation. */
+.gdi-ask-question { font-size: .84em; opacity: .68; }
+.gdi-processing { spacing: 6px; padding: 4px 0; opacity: .85; }
+.gdi-processing-mark { opacity: .9; }
+.gdi-processing-dot { font-size: 1.1em; opacity: 90; }
+.gdi-stream-tail { font-size: .92em; }
+
+/* Markdown code blocks: distinct, horizontally scrollable, easy to copy. */
+.gdi-code-header { min-height: 20px; }
+.gdi-code-copy { min-height: 24px; padding: 0 8px; font-size: .78em; border-radius: 6px; opacity: .85; }
+.gdi-code-scroll { padding-bottom: 4px; }
+.gdi-code-text { font-size: .85em; }
+
+/* Intelligence history. */
+.gdi-history-group { font-size: .8em; font-weight: 700; opacity: .7; padding-top: 6px; }
+.gdi-history-row { padding: 8px 10px; border-radius: 8px; }
+.gdi-history-title { font-size: .95em; font-weight: 600; }
+.gdi-history-detail { font-size: .8em; opacity: .68; }
+
+/* Predictive writing ghost text: visibly secondary, never confused with
+ * typed text, no color of its own. */
+.gdi-ghost-text { font-size: .9em; opacity: .58; font-style: italic; }
+.gdi-ghost-hint { font-size: .74em; opacity: .55; }

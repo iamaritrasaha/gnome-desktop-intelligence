@@ -158,6 +158,12 @@ export default class GdiExtension extends Extension {
     });
     this._indicator.menu.addMenuItem(settingsItem);
 
+    const historyItem = new PopupMenu.PopupMenuItem(_('Intelligence History'));
+    historyItem.connect('activate', () => {
+      this._palette?.openHistory();
+    });
+    this._indicator.menu.addMenuItem(historyItem);
+
     const quitItem = new PopupMenu.PopupMenuItem(_('Quit Intelligence'));
     quitItem.connect('activate', () => {
       Main.extensionManager.disableExtension(this.uuid);

@@ -179,17 +179,19 @@ probe = r'''    if (global._gdiSmokeProbeStarted)
                         resultY >= resultMonitor.y + Main.panel.height &&
                         resultY + resultHeight <=
                           resultMonitor.y + resultMonitor.height);
-                      palette._writingContext = { selected: 'fixture selection' };
+                      palette._writingContext = { selected: 'fixture selection',
+                        capabilities: { canReadSelection: true } };
                       palette._showWritingActions();
-                      report('writing-tools-complete', palette._items.length === 11 &&
-                        palette._results.get_children().length === 11 &&
-                        palette._scrollView.visible);
+                      report('writing-tools-primary-chips', palette._mode === 'writing-actions' &&
+                        palette._writingControls.get_children().length === 5 &&
+                        palette._scrollView.visible === false);
                       const expandedHeight = preferredHeight();
                       const menuItems = this._indicator.menu._getMenuItems();
                       report('panel-indicator-menu',
                         Main.panel.statusArea['gdi-indicator'] === this._indicator &&
-                        menuItems.length === 4 && menuItems[2].label.text === 'Settings' &&
-                        menuItems[3].label.text === 'Quit Intelligence');
+                        menuItems.length === 5 && menuItems[2].label.text === 'Settings' &&
+                        menuItems[3].label.text === 'Intelligence History' &&
+                        menuItems[4].label.text === 'Quit Intelligence');
 
                       palette.close();
                       after(180, () => {
@@ -376,7 +378,7 @@ rg -e '^Extension state:' -e '^Extension errors:' -e '^Extension reload:' \
 rg 'GDI_TEST' "$test_root/session.log" "$HOME/nested-shell.log" 2>/dev/null || true
 rg 'GDI_ATSPI' "$test_root/writing-service-test.log" 2>/dev/null || true
 for expected in \
-  'writing-preview-replace=true' \
+  'writing-tools-preview-transition=true' \
   'preview-tab-navigation=true' \
   'preview-backtab-navigation=true' \
   'preview-enter-replaces=true' \
@@ -386,6 +388,31 @@ for expected in \
   'ask-fallback=true' \
   'ask-response=true' \
   'ask-no-replace=true' \
+  'ask-processing-animation=true' \
+  'ask-fixed-width-loading=true' \
+  'ask-fixed-width-streaming=true' \
+  'ask-fixed-width-result=true' \
+  'markdown-code-copy-control=true' \
+  'markdown-no-token-flash=true' \
+  'ask-question-shown-subdued=true' \
+  'history-conversation-created=true' \
+  'history-groups-rendered=true' \
+  'history-list-has-entry=true' \
+  'history-conversation-restored=true' \
+  'history-continue-id-resumed=true' \
+  'history-continue-answers=true' \
+  'history-delete-removes-row=true' \
+  'history-clear-arms-confirm=true' \
+  'history-clear-empties-list=true' \
+  'history-disabled-no-conversation=true' \
+  'writing-tools-primary=true' \
+  'writing-tools-selection-preview=true' \
+  'writing-tools-tone-submenu=true' \
+  'writing-tools-more-submenu=true' \
+  'writing-tools-escape-returns-from-question=true' \
+  'writing-tools-preview-transition=true' \
+  'writing-tools-preview-diff=true' \
+  'contextual-writing-surface=true' \
   'ask-bare-row-prompt-only=true' \
   'ask-bare-enters-empty-prompt=true' \
   'ask-empty-enter-no-request=true' \
@@ -440,7 +467,7 @@ for expected in \
   'navigation-and-completion-logic=true' \
   'result-limit=true' \
   'results-layout-bounds=true' \
-  'writing-tools-complete=true' \
+  'writing-tools-primary-chips=true' \
   'panel-indicator-menu=true' \
   'close-transition=true' \
   'dynamic-height-shrink=true' \

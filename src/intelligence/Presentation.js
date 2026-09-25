@@ -58,7 +58,7 @@ export function markdownBlocks(text) {
   for (const line of text.slice(0, 20000).split('\n')) {
     if (/^\s*```/.test(line)) {
       flush();
-      if (code !== null) { blocks.push({kind: 'code', markup: escapeMarkup(code.join('\n'))}); code = null; }
+      if (code !== null) { blocks.push({kind: 'code', markup: escapeMarkup(code.join('\n')), raw: code.join('\n')}); code = null; }
       else code = [];
     } else if (code !== null) code.push(line);
     else if (/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/.test(line)) {
@@ -73,7 +73,7 @@ export function markdownBlocks(text) {
     else paragraph.push(line);
   }
   flush();
-  if (code !== null) blocks.push({kind: 'code', markup: escapeMarkup(code.join('\n'))});
+  if (code !== null) blocks.push({kind: 'code', markup: escapeMarkup(code.join('\n')), raw: code.join('\n')});
   return blocks;
 }
 
@@ -81,6 +81,40 @@ export function responseLinks(text) {
   // Only explicit user activation launches a web URI. No file/custom schemes.
   return [...new Set(text.match(/https?:\/\/[^\s<>"`\])]+/gi) ?? [])]
     .map(uri => uri.replace(/[.,;!?]+$/, '')).filter(safeLink).slice(0, 4);
+}
+
+/* Streaming Markdown hygiene. While a response is arriving, only completed
+ * lines become rendered blocks; the trailing partial line is shown as plain
+ * text — and hidden entirely when it still contains raw syntax tokens, so the
+ * user never sees broken `#`, `**`, backticks or list markers flash. */
+export function stableStreamView(text) {
+  const source = String(text ?? '');
+  const cut = source.lastIndexOf('\n');
+  const stable = cut >= 0 ? source.slice(0, cut) : '';
+  let tail = cut >= 0 ? source.slice(cut + 1) : source;
+  if (/[`*_#>~\[\]]/.test(tail) || /^\s*(?:[-*+]|\d+[.)])/.test(tail))
+    tail = '';
+  return {stable, tail};
+}
+
+const DAY_MS = 86400000;
+
+/* History grouping: Today / Yesterday / Earlier by local calendar day. */
+export function historyGroups(conversations, now = Date.now()) {
+  const groups = {Today: [], Yesterday: [], Earlier: []};
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  const today = startOfToday.getTime();
+  for (const conversation of conversations ?? []) {
+    const updated = Number(conversation.updatedAt ?? 0) * 1000;
+    if (updated >= today)
+      groups.Today.push(conversation);
+    else if (updated >= today - DAY_MS)
+      groups.Yesterday.push(conversation);
+    else
+      groups.Earlier.push(conversation);
+  }
+  return groups;
 }
 
 export function selectionIntent(query) {

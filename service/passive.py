@@ -8,9 +8,34 @@ import gi
 gi.require_version('Atspi', '2.0')
 from gi.repository import Atspi, Gio, GLib
 from quality import candidate, quality
+from prediction import clean_prediction, prediction_source
 
 EVENTS = ('object:text-changed', 'object:text-caret-moved',
           'object:text-selection-changed', 'object:state-changed:focused')
+
+# Predictive writing: a short continuation offered after a typing pause. Its
+# pacing is intentionally separate from proofreading, and much stricter about
+# not firing: a debounced pause, a minimum interval, end-of-text caret, and a
+# useful-context minimum all gate the single model request.
+PREDICTION_DEBOUNCE_MS = 500
+MIN_PREDICTION_INTERVAL = 2.5
+PREDICTION_EXPIRY_SECONDS = 10
+PREDICTION_CONTEXT_CHARS = 320
+
+
+def _prediction_prefix(continuation, words):
+    """(accepted prefix, remaining ghost) for word-wise acceptance."""
+    words = max(0, int(words or 0))
+    if words <= 0:
+        return continuation, ''
+    leading = ''
+    body = continuation
+    if body[:1] in (' ', '\n'):
+        leading, body = body[0], body[1:]
+    parts = body.split(' ')
+    if words >= len(parts):
+        return continuation, ''
+    return leading + ' '.join(parts[:words]), ' ' + ' '.join(parts[words:])
 
 
 class PassiveWriting:
@@ -21,15 +46,22 @@ class PassiveWriting:
         self.geometry = {}
         self.listener = None
         self.enabled = False
+        self.predict_enabled = False
         self.timer = self.expiry = self.post_timer = 0
+        self.predict_timer = self.predict_expiry = 0
         self.source = None
         self.offer = self.post = None
+        self.ghost = None
         self.cancel = None
+        self.predict_cancel = None
         self.anchor_nonce = self.anchor_cache = None
+        self.anchor_retry = None
         self.generation = 0
+        self.predict_generation = 0
         self.backoff_until = 0
         self.failures = 0
         self.last_request = 0
+        self.last_prediction = 0
         self.last_text_event = 0
         self.last_source = None
         self.metrics = Counter()
@@ -42,10 +74,19 @@ class PassiveWriting:
             self.service._learning.purge_examples()
         if key == 'enable-learning' and not self.settings.get_boolean(key):
             self.forget_learning()
-        if key.startswith('model-') or key in ('enable-passive-writing', 'passive-debounce-ms'):
+        if key.startswith('model-') or key in ('enable-passive-writing',
+                                               'enable-predictive-writing',
+                                               'passive-debounce-ms'):
             self.backoff_until = 0
             self.dismiss('settings')
+            self.dismiss_prediction('settings')
             if not self.settings.get_boolean('enable-passive-writing'):
+                self.enabled = False
+                self.dismiss('disabled')
+            if not self.settings.get_boolean('enable-predictive-writing'):
+                self.predict_enabled = False
+                self.dismiss_prediction('disabled')
+            if not self.enabled and not self.predict_enabled:
                 self.stop()
 
     def supports_field(self, context):
@@ -74,17 +115,20 @@ class PassiveWriting:
         self.trace.append(record)
         del self.trace[:-30]
 
-    def configure(self, owner, enabled, pid, geometry):
+    def configure(self, owner, passive_enabled, prediction_enabled, pid, geometry):
         changed = owner != self.owner or pid != self.pid or geometry != self.geometry
         if changed:
             self.dismiss('focus')
             self.finish_post()
             self.last_source = None
         self.owner, self.pid, self.geometry = owner, pid, geometry
-        self.enabled = bool(enabled and pid > 0 and self.settings.get_boolean('enable-passive-writing'))
-        if changed and self.enabled:
+        self.enabled = bool(passive_enabled and pid > 0 and
+                            self.settings.get_boolean('enable-passive-writing'))
+        self.predict_enabled = bool(prediction_enabled and pid > 0 and
+                                    self.settings.get_boolean('enable-predictive-writing'))
+        if changed and (self.enabled or self.predict_enabled):
             self._trace('focus', pid=pid)
-        if not self.enabled:
+        if not self.enabled and not self.predict_enabled:
             self.stop()
         elif not self.listener:
             self.listener = Atspi.EventListener.new(self._event, None, None)
@@ -94,7 +138,9 @@ class PassiveWriting:
 
     def stop(self):
         self.enabled = False
+        self.predict_enabled = False
         self.dismiss('disabled')
+        self.dismiss_prediction('disabled')
         self.finish_post()
         if self.listener:
             for event in EVENTS:
@@ -153,14 +199,14 @@ class PassiveWriting:
 
     def _event(self, event, *_):
         # Never inspect event.any_data: AT-SPI includes inserted/deleted text there.
-        if not self.enabled:
+        if not self.enabled and not self.predict_enabled:
             return
         source = event.source
         if not self._same_app(source):
             return
         try:
             if self.service._protected_ancestry(source):
-                self.dismiss('sensitive'); self.finish_post(); return
+                self.dismiss('sensitive'); self.dismiss_prediction('sensitive'); self.finish_post(); return
             kind = event.type
             if self.post and source == self.post['accessible']:
                 context = self.service._contexts.get(self.post['token'], {})
@@ -170,6 +216,7 @@ class PassiveWriting:
                     self._post_event(event)
             if 'focused' in kind:
                 self.dismiss('focus')
+                self.dismiss_prediction('focus')
                 if not event.detail1: self.finish_post()
                 return
             if 'text-changed' in kind:
@@ -182,9 +229,19 @@ class PassiveWriting:
                     self.trace[-1]['events'] = self.trace[-1].get('events', 1) + 1
                 else:
                     self._trace('typing', role=Atspi.Role.get_name(source.get_role()))
-                self.dismiss('continued_typing')
-                self.source = source
-                self.timer = GLib.timeout_add(self.settings.get_int('passive-debounce-ms'), self._trigger)
+                own_settle = False
+                if self.ghost:
+                    ghost_context = self.service._contexts.get(self.ghost['token'], {})
+                    own_settle = bool(ghost_context.get('awaiting_own'))
+                if not own_settle:
+                    # Our own partial insert is still settling; its AT-SPI
+                    # echo must not dismiss the remainder ghost.
+                    self.dismiss('continued_typing')
+                    self.source = source
+                    if self.enabled:
+                        self.timer = GLib.timeout_add(self.settings.get_int('passive-debounce-ms'), self._trigger)
+                    if self.predict_enabled:
+                        self.schedule_prediction()
             elif 'caret' in kind or 'selection' in kind:
                 if self.timer and source == self.source and time.monotonic() - self.last_text_event < .05:
                     # Each insert normally emits its caret event afterwards. The
@@ -192,10 +249,47 @@ class PassiveWriting:
                     return
                 if self.offer or self.cancel or self.timer:
                     self.dismiss('caret')
+                if self.ghost:
+                    # GTK emits caret and selection events together; the live
+                    # offset decides. The echo of the user's last insert at the
+                    # predicted position is not navigation and keeps the ghost.
+                    try:
+                        moved = Atspi.Text.get_caret_offset(source) != self.ghost.get('caret', -1)
+                    except Exception:
+                        moved = True
+                    if moved:
+                        self.dismiss_prediction('caret')
+                elif self.predict_cancel or self.predict_timer:
+                    self.dismiss_prediction('caret')
                 if self.post:
                     self.finish_post()
         except Exception:
             self.dismiss('unavailable')
+
+    def _resolve_anchor(self, source, caret, retry=None, timer_name='timer', expiry=None):
+        """WINDOW character extents when available, else a fresh coordinate
+        snapshot requested from the Shell (input-method caret location).
+        Returns an anchor dict, or None after emitting the request; the
+        pending retry callable runs from set_anchor."""
+        try:
+            rect = Atspi.Text.get_character_extents(source, max(0, caret - 1), Atspi.CoordType.WINDOW)
+            anchor = {'x': rect.x, 'y': rect.y, 'height': rect.height}
+            # Firefox on Wayland may return sentinel coordinates rather
+            # than an error for WINDOW extents. Treat both as unavailable.
+            if self._valid_anchor(anchor):
+                return anchor
+        except Exception:
+            pass
+        anchor = self.anchor_cache
+        self.anchor_cache = None
+        if anchor is not None and self._valid_anchor(anchor):
+            return anchor
+        self.anchor_nonce = secrets.token_urlsafe(18)
+        self.anchor_retry = retry or self._trigger
+        self.emit('PassiveAnchorRequest', self.anchor_nonce)
+        self._drop_timer(timer_name)
+        setattr(self, timer_name, GLib.timeout_add(600, expiry or (lambda: self.dismiss('no-anchor'))))
+        return None
 
     def _trigger(self):
         self.timer = 0
@@ -207,6 +301,8 @@ class PassiveWriting:
             self.metrics['trigger_ineligible_or_cooldown'] += 1
             self._trace('ineligible')
             return GLib.SOURCE_REMOVE
+        # A proven correction supersedes any visible prediction.
+        self.dismiss_prediction('superseded')
         token = None
         try:
             caret = Atspi.Text.get_caret_offset(source)
@@ -237,21 +333,9 @@ class PassiveWriting:
             if self.last_source == (source, start, fingerprint):
                 self._trace('duplicate-source')
                 return GLib.SOURCE_REMOVE
-            try:
-                rect = Atspi.Text.get_character_extents(source, max(0, caret - 1), Atspi.CoordType.WINDOW)
-                anchor = {'x': rect.x, 'y': rect.y, 'height': rect.height}
-                # Firefox on Wayland may return sentinel coordinates rather
-                # than an error for WINDOW extents. Treat both as unavailable.
-                if not self._valid_anchor(anchor):
-                    raise ValueError('Unavailable accessibility coordinates')
-            except Exception:
-                anchor = self.anchor_cache
-                self.anchor_cache = None
-                if anchor is None:
-                    self.anchor_nonce = secrets.token_urlsafe(18)
-                    self.emit('PassiveAnchorRequest', self.anchor_nonce)
-                    self.timer = GLib.timeout_add(600, lambda: self.dismiss('no-anchor'))
-                    return GLib.SOURCE_REMOVE
+            anchor = self._resolve_anchor(source, caret)
+            if anchor is None:
+                return GLib.SOURCE_REMOVE
             if not self._valid_anchor(anchor):
                 self.metrics['invalid_anchor'] += 1
                 self._trace('anchor-invalid', anchor=anchor)
@@ -350,13 +434,278 @@ class PassiveWriting:
                 0 <= anchor.get('x', -1) <= self.geometry.get('width', 0) and
                 0 <= anchor.get('y', -1) and anchor['y'] + anchor['height'] <= self.geometry.get('height', 0))
 
-    def set_anchor(self, nonce, anchor):
-        if nonce != self.anchor_nonce or not self.enabled:
+    def schedule_prediction(self):
+        """(Re)arm the prediction pause. Continued typing restarts the timer
+        and aggressively cancels any in-flight or already shown prediction."""
+        self.dismiss_prediction('continued_typing')
+        self._drop_timer('predict_timer')
+        self.predict_timer = GLib.timeout_add(PREDICTION_DEBOUNCE_MS, self._prediction_trigger)
+
+    def dismiss_prediction(self, reason='dismissed'):
+        had_work = self.ghost is not None or self.predict_cancel is not None
+        self._drop_timer('predict_timer')
+        self._drop_timer('predict_expiry')
+        self.predict_generation += 1
+        if self.predict_cancel:
+            self.predict_cancel.cancel()
+            self.predict_cancel = None
+            self.metrics['prediction_cancelled'] += 1
+        data, self.ghost = self.ghost, None
+        if data and data.get('shown') and reason in ('dismissed', 'continued_typing',
+                                                     'caret', 'focus', 'expired'):
+            signal = 'dismissed' if reason in ('dismissed',) else 'ignored'
+            self._trace('prediction-dismissed', reason=reason, signal=signal)
+            if data.get('learn') and self.settings.get_boolean('enable-learning'):
+                try:
+                    self.service._learning.record_prediction(data['application'], signal)
+                except Exception:
+                    self.metrics['learning_errors'] += 1
+        # The Shell must hide a stale ghost immediately, exactly like a
+        # dismissed correction; never leave an unbacked surface visible.
+        if had_work and self.owner:
+            self.emit('PassiveHidden', 'prediction-' + reason)
+        return GLib.SOURCE_REMOVE
+
+    def _prediction_trigger(self):
+        self.predict_timer = 0
+        if not self.predict_enabled:
+            return GLib.SOURCE_REMOVE
+        source = self.source
+        now = time.monotonic()
+        if (not source or self.offer or self.cancel or
+                now - self.last_prediction < MIN_PREDICTION_INTERVAL or
+                now < self.backoff_until):
+            self._trace('prediction-ineligible', busy=bool(self.offer or self.cancel))
+            return GLib.SOURCE_REMOVE
+        token = None
+        try:
+            if not self._eligible(source):
+                self._trace('prediction-ineligible', reason='field')
+                return GLib.SOURCE_REMOVE
+            caret = Atspi.Text.get_caret_offset(source)
+            length = Atspi.Text.get_character_count(source)
+            # Predict only at the very end of the text the user just typed;
+            # mid-document carets cannot be inserted into safely.
+            if caret < 1 or caret != length:
+                self._trace('prediction-ineligible', reason='caret')
+                return GLib.SOURCE_REMOVE
+            base = max(0, caret - PREDICTION_CONTEXT_CHARS)
+            if not self.service._public_text_range(source, max(0, base - 32), min(length, caret + 32)):
+                self.metrics['sensitive_range_suppressed'] += 1
+                return GLib.SOURCE_REMOVE
+            nearby = Atspi.Text.get_text(source, base, caret)
+            source_text = prediction_source(nearby)
+            if not source_text:
+                self.metrics['prediction_context_suppressed'] += 1
+                self._trace('prediction-ineligible', reason='context')
+                return GLib.SOURCE_REMOVE
+            anchor = self._resolve_anchor(
+                source, caret, retry=self._prediction_trigger,
+                timer_name='predict_timer',
+                expiry=lambda: self.dismiss_prediction('no-anchor'))
+            if anchor is None:
+                return GLib.SOURCE_REMOVE
+            application = (source.get_application().get_name() or '')[:128]
+            learn = self.settings.get_boolean('enable-learning')
+            if learn and not self.service._learning.allows_prediction(application):
+                self.metrics['prediction_personalization_suppressed'] += 1
+                self._trace('prediction-suppressed', reason='learning')
+                return GLib.SOURCE_REMOVE
+            token = secrets.token_urlsafe(24)
+            context = dict(token=token, selected='', nearby='', application=application,
+                role=Atspi.Role.get_name(source.get_role()), caret=caret, accessible=source,
+                editable=True, passive=True, insert=True, prediction=True,
+                start=caret, end=caret, length=length,
+                before=Atspi.Text.get_text(source, max(0, caret - 32), caret),
+                after=Atspi.Text.get_text(source, caret, min(length, caret + 32)),
+                created=now, stale=False, owner=self.owner, action='prediction')
+            self.service._prune_contexts()
+            self.service._contexts[token] = context
+            self.service._watch_context(context)
+            if context.get('stale') or not context.get('ready'):
+                self._trace('prediction-capture-stale')
+                self.service._release_context(token)
+                return GLib.SOURCE_REMOVE
+            states = source.get_state_set()
+            data = dict(kind='prediction', token=token, continuation='', application=application,
+                source_text=source_text, anchor=anchor, caret=caret, length=length,
+                tab_safe=states.contains(Atspi.StateType.MULTI_LINE) and source.get_application().get_toolkit_name() == 'GTK',
+                learn=learn, shown=False)
+            self.last_prediction = now
+            self.metrics['prediction_requests'] += 1
+            self.predict_generation += 1
+            generation = self.predict_generation
+            self.predict_cancel = Gio.Cancellable()
+            started = now
+
+            def completed(continuation, error):
+                if generation != self.predict_generation:
+                    return
+                self.predict_cancel = None
+                latency = round((time.monotonic() - started) * 1000)
+                if error:
+                    self.metrics['prediction_provider_errors'] += 1
+                    self._trace('prediction-error', latency_ms=latency)
+                    self.service._release_context(token)
+                    return
+                self.metrics['prediction_latency_ms_total'] += latency
+                gated = clean_prediction(source_text, continuation or '')
+                self._trace('prediction-gate', decision=bool(gated), chars=len(gated or ''),
+                            latency_ms=latency)
+                if not gated:
+                    self.metrics['prediction_gate_suppressed'] += 1
+                    self.service._release_context(token)
+                    return
+                # The user may have kept typing while the model was working.
+                if not self._prediction_current(data):
+                    self.metrics['prediction_stale'] += 1
+                    self._trace('prediction-stale')
+                    self.service._release_context(token)
+                    return
+                data['continuation'] = gated
+                data['shown'] = True
+                self.ghost = data
+                self.metrics['prediction_shown'] += 1
+                self._trace('prediction-shown', anchor='extents' if anchor else 'input-method')
+                self.emit('PassiveSuggestion', json.dumps({
+                    'kind': 'prediction', 'token': token, 'continuation': gated,
+                    'anchor': anchor, 'tab_safe': data['tab_safe']}))
+                self.predict_expiry = GLib.timeout_add_seconds(
+                    PREDICTION_EXPIRY_SECONDS, lambda: self.dismiss_prediction('expired'))
+            try:
+                self._trace('prediction-request', model=self.settings.get_string('model-quick-writing'),
+                            context_chars=len(source_text))
+                self.service._router.run_prediction(
+                    source=source_text, provider_name=self.settings.get_string('model-provider'),
+                    endpoint=self.settings.get_string('model-endpoint'),
+                    model=self.settings.get_string('model-quick-writing'),
+                    cancellable=self.predict_cancel, callback=completed)
+            except Exception as error:
+                self._trace('prediction-request-failed', error=type(error).__name__)
+                completed(None, error)
+        except Exception as error:
+            self.metrics['prediction_error_' + type(error).__name__] += 1
+            if token and (not self.ghost or self.ghost['token'] != token):
+                self.service._release_context(token)
+            self.dismiss_prediction('unavailable')
+        return GLib.SOURCE_REMOVE
+
+    def _prediction_current(self, data):
+        """Freshness check before showing or accepting: the same field is
+        still focused and its caret and length are unchanged."""
+        source = self.source
+        if not source or not self._eligible(source):
+            return False
+        try:
+            return (Atspi.Text.get_caret_offset(source) == data['caret'] and
+                    Atspi.Text.get_character_count(source) == data['length'])
+        except Exception:
+            return False
+
+    def accept_prediction(self, token, words):
+        """Insert the whole continuation (words=0) or its first words. The
+        insertion reuses the guarded caret-range editor; the remainder stays
+        as ghost text at the new caret."""
+        data = self.ghost
+        if not data or token != data['token']:
+            return False, 'This prediction is no longer current.'
+        context = self.service._contexts.get(token)
+        if not data.get('shown') or not context or not self._prediction_current(data):
+            self._trace('prediction-accept-refused', reason='stale')
+            self.dismiss_prediction('stale')
+            return False, 'The text changed; nothing was inserted.'
+        prefix, remainder = _prediction_prefix(data['continuation'], words)
+        if not prefix:
+            return False, 'Nothing to insert.'
+        result, message = self.service._replace(token, prefix, False)
+        self._trace('prediction-insert', success=bool(result), partial=bool(remainder))
+        if not result:
+            self.metrics['prediction_insert_refused'] += 1
+            return result, message
+        self._drop_timer('predict_expiry')
+        if self.settings.get_boolean('enable-learning') and data.get('learn'):
+            try:
+                self.service._learning.record_prediction(
+                    data['application'], 'partial' if remainder else 'accepted')
+            except Exception:
+                self.metrics['learning_errors'] += 1
+        if not remainder:
+            self.ghost = None
+            # The insertion leaves the caret at the end of the inserted text;
+            # the undo verification must expect that position.
+            context['caret'] = context['undo_end']
+            try:
+                Atspi.Text.set_caret_offset(context['accessible'], context['undo_end'])
+            except Exception:
+                pass
+            # A short guarded undo watch; typing removes it and an immediate
+            # undo is recorded as a negative prediction signal.
+            self.post = dict(data, accessible=context['accessible'],
+                start=context['start'], end=context['end'], length=context['length'],
+                edit_end=context['undo_end'], dirty=False, range_uncertain=False,
+                learn=data.get('learn'), retain=False, source=prefix,
+                replacement=prefix, category='prediction', pattern='',
+                context_type='prediction', model=self.settings.get_string('model-quick-writing'),
+                prediction=True)
+            self._trace('prediction-accepted')
+            self.emit('PassiveSuggestion', json.dumps({
+                'kind': 'prediction_done', 'token': token}))
+            self.post_timer = GLib.timeout_add_seconds(8, self._finish_prediction_post)
+            return True, 'Continuation inserted.'
+        # Partial acceptance: re-anchor the remaining ghost at the new caret.
+        context.pop('replaced', None)
+        context.pop('undo_original', None)
+        context['start'] = context['end'] = context['caret'] = context['undo_end']
+        context['before'] = (context['before'] + prefix)[-32:]
+        context['after'] = ''
+        data['continuation'] = remainder
+        data['caret'] = context['caret']
+        data['length'] = context['length']
+        self.ghost = data
+        try:
+            Atspi.Text.set_caret_offset(context['accessible'], context['caret'])
+        except Exception:
+            pass
+        self.anchor_nonce = secrets.token_urlsafe(18)
+        self.anchor_retry = lambda: self._reshow_prediction(data)
+        self.emit('PassiveAnchorRequest', self.anchor_nonce)
+        self.predict_expiry = GLib.timeout_add_seconds(
+            PREDICTION_EXPIRY_SECONDS, lambda: self.dismiss_prediction('expired'))
+        return True, 'Continuation inserted.'
+
+    def _reshow_prediction(self, data):
+        if not self.ghost or self.ghost['token'] != data['token']:
             return
+        anchor = self.anchor_cache or data.get('anchor', {})
+        self.anchor_cache = None
+        self._trace('prediction-reshown', partial=True)
+        self.emit('PassiveSuggestion', json.dumps({
+            'kind': 'prediction', 'token': data['token'], 'continuation': data['continuation'],
+            'anchor': anchor, 'tab_safe': data['tab_safe']}))
+
+    def _finish_prediction_post(self):
+        self._drop_timer('post_timer')
+        data, self.post = self.post, None
+        if not data:
+            return GLib.SOURCE_REMOVE
+        # The acceptance signal was recorded when the continuation was
+        # inserted; an explicit Ctrl+Alt+Z undo records its own signal.
+        self.service._release_context(data['token'])
+        self.emit('PassiveHidden', 'expired')
+        return GLib.SOURCE_REMOVE
+
+    def set_anchor(self, nonce, anchor):
+        if nonce != self.anchor_nonce or not (self.enabled or self.predict_enabled):
+            return
+        # Whichever feature requested the anchor, its no-anchor expiry must
+        # not fire after the answer arrived.
         self._drop_timer('timer')
+        self._drop_timer('predict_timer')
         self.anchor_nonce = None
         self.anchor_cache = anchor
-        self._trigger()
+        retry, self.anchor_retry = self.anchor_retry, None
+        if retry:
+            retry()
 
     def current(self):
         data = self.offer
@@ -434,7 +783,14 @@ class PassiveWriting:
             return False, 'This correction is no longer current.'
         result, message = self.service._undo(token)
         if result:
-            self._record(data, 'immediate_undo')
+            if data.get('prediction'):
+                if self.settings.get_boolean('enable-learning') and data.get('learn'):
+                    try:
+                        self.service._learning.record_prediction(data['application'], 'immediate_undo')
+                    except Exception:
+                        self.metrics['learning_errors'] += 1
+            else:
+                self._record(data, 'immediate_undo')
             self._drop_timer('post_timer')
             self.post = None
             self.service._release_context(token)
@@ -445,6 +801,12 @@ class PassiveWriting:
         self._drop_timer('post_timer')
         data, self.post = self.post, None
         if not data: return GLib.SOURCE_REMOVE
+        if data.get('prediction'):
+            # The prediction outcome signal was recorded at acceptance; this
+            # watch only bounds how long the undo range stays protected.
+            self.service._release_context(data['token'])
+            self.emit('PassiveHidden', 'expired')
+            return GLib.SOURCE_REMOVE
         try:
             final = None
             if (data.get('learn') and not data.get('range_uncertain') and
@@ -473,8 +835,11 @@ class PassiveWriting:
                 self.metrics['learning_errors'] += 1
 
     def stats(self):
-        return dict(self.metrics, enabled=self.enabled, listeners=len(EVENTS) if self.listener else 0,
-                    timers=sum(bool(value) for value in (self.timer, self.expiry, self.post_timer)),
+        return dict(self.metrics, enabled=self.enabled, prediction_enabled=self.predict_enabled,
+                    listeners=len(EVENTS) if self.listener else 0,
+                    timers=sum(bool(value) for value in (self.timer, self.expiry, self.post_timer,
+                                                         self.predict_timer, self.predict_expiry)),
                     active_request=self.cancel is not None,
+                    prediction_active=self.predict_cancel is not None,
                     average_latency_ms=round(self.metrics['latency_ms_total'] / max(1, self.metrics['completed'])),
                     recent=list(self.trace))

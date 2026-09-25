@@ -143,6 +143,7 @@ export async function validateIntelligence(palette, report) {
     }
     throw new Error(`Intelligence check timed out in ${palette._mode}`);
   };
+  const chipLabels = () => palette._writingControls.get_children().map(button => button.label).join(',');
   palette.close();
   await pause(180);
   palette._settings.set_string('model-endpoint', `http://127.0.0.1:${GLib.getenv('GDI_MOCK_PORT')}`);
@@ -153,10 +154,18 @@ export async function validateIntelligence(palette, report) {
   palette._activateItem(0);
   report('ask-loading-cancellable', palette._mode === 'writing-loading' &&
     palette._writingControls.get_first_child()?.label === 'Cancel');
+  // Fixed width and the processing animation during generation.
+  report('ask-processing-animation', palette._processing?.visible === true &&
+    palette._writingContent.get_children().some(child =>
+      child.has_style_class_name?.('gdi-processing')));
+  report('ask-fixed-width-loading', palette._palette.width === 500);
   await until(() => palette._streamText?.length > 0);
-  report('incremental-streaming', palette._mode === 'writing-loading');
+  report('incremental-streaming', palette._mode === 'writing-loading' &&
+    palette._processing === null);
+  report('ask-fixed-width-streaming', palette._palette.width === 500);
   await until(() => palette._mode === 'writing-result' || palette._mode === 'writing-error');
   report('ask-response', palette._mode === 'writing-result' && palette._writingSuggestion.includes('Fixture answer'));
+  report('ask-fixed-width-result', palette._palette.width === 500);
   const buttons = palette._writingControls.get_children();
   report('ask-no-replace', buttons.map(b => b.label).join(',') === 'Copy,Retry,Clear');
   palette._copyWritingResult();
@@ -180,20 +189,99 @@ export async function validateIntelligence(palette, report) {
     child.clutter_text && child.clutter_text.get_layout().get_line_count() > 2));
   report('long-answer-bounded', palette._palette.height < monitor.height - 48 &&
     y + palette._palette.height <= monitor.y + monitor.height && palette._palette.width === 500);
+  // Follow-up with streaming Markdown: no raw tokens may flash while the
+  // response streams, and completed structure renders natively.
+  let rawTokenFlash = false;
+  const flashWatcher = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 16, () => {
+    if (!palette._isOpen || !palette._streamText)
+      return GLib.SOURCE_CONTINUE;
+    for (const child of palette._writingContent.get_children()) {
+      const text = child.text ?? '';
+      if (text.includes('```') || /\*\*|^#{1,6} /m.test(text))
+        rawTokenFlash = true;
+    }
+    return GLib.SOURCE_CONTINUE;
+  });
   palette._followup.set_text('Markdown fixture');
   palette._followup.clutter_text.emit('activate');
   await until(() => palette._mode === 'writing-result');
+  GLib.source_remove(flashWatcher);
   report('markdown-heading-code-link', palette._writingContent.get_children().some(c => c.has_style_class_name('gdi-markdown-code')) &&
     palette._writingContent.get_children().some(c => c.accessible_name === 'Open link https://www.gnome.org/'));
+  const codeBlock = palette._writingContent.get_children().find(c => c.has_style_class_name('gdi-markdown-code'));
+  report('markdown-code-copy-control', Boolean(codeBlock) &&
+    codeBlock.get_children().some(child => child.get_children().some(button => button.label === 'Copy')));
+  report('markdown-no-token-flash', !rawTokenFlash);
   await capture('phase35-markdown');
   report('temporary-followup-context', palette._conversation.length === 4 && palette._requestHistory.length === 2);
+  report('ask-question-shown-subdued', palette._writingContent.get_children().some(c =>
+    c.has_style_class_name?.('gdi-ask-question') && (c.text ?? '').includes('Markdown fixture')));
+  report('history-conversation-created', typeof palette._conversationId === 'string' &&
+    palette._conversationId.length > 0);
   palette._followup.set_text('Follow-up fixture');
   palette._followup.clutter_text.emit('activate');
   await until(() => palette._mode === 'writing-result');
   report('followup-response', palette._writingSuggestion.includes('previous answer') && palette._conversation.length === 6);
+  // Clear starts a fresh conversation instead of destroying saved history.
+  const savedConversationId = palette._conversationId;
   palette._writingControls.get_children().find(b => b.label === 'Clear').emit('clicked', 1);
-  report('clear-forgets-conversation', palette._mode === 'launcher' && palette._conversation.length === 0 && palette._writingContext === null);
+  report('clear-forgets-conversation', palette._mode === 'launcher' && palette._conversation.length === 0 &&
+    palette._writingContext === null && palette._conversationId === null);
+  await pause(300);
+
+  // History: open, grouped list, restore, continue, delete, clear.
+  palette.close();
+  await pause(180);
+  palette.openHistory();
+  await until(() => palette._mode === 'history-list');
+  await pause(400);
+  report('history-groups-rendered', ['Today', 'Yesterday', 'Earlier'].some(label =>
+    palette._writingContent.get_children().some(c => c.text === label)));
+  const historyRow = palette._writingContent.get_children().find(c => c.has_style_class_name?.('gdi-history-row'));
+  report('history-list-has-entry', Boolean(historyRow));
+  historyRow.emit('clicked', 1);
+  await until(() => palette._mode === 'history-conversation');
+  await pause(200);
+  report('history-conversation-restored', palette._writingContent.get_children().some(c =>
+    (c.text ?? '').includes('Markdown fixture')));
+  report('history-continue-id-resumed', palette._conversationId === savedConversationId);
+  palette._followup.set_text('EchoFixture: history continued answer');
+  palette._followup.clutter_text.emit('activate');
+  await until(() => palette._mode === 'writing-result');
+  console.log('GDI_DEBUG history-continue-suggestion', JSON.stringify(palette._writingSuggestion));
+  report('history-continue-answers', palette._writingSuggestion === 'history continued answer');
+  palette._showHistoryList();
+  await until(() => palette._mode === 'history-list');
+  await pause(400);
+  const rowsBeforeDelete = palette._writingContent.get_children().filter(c => c.has_style_class_name?.('gdi-history-row'));
+  const rowToOpen = rowsBeforeDelete[0];
+  rowToOpen.emit('clicked', 1);
+  await until(() => palette._mode === 'history-conversation');
+  const deleteButton = palette._writingControls.get_children().find(b => b.label === 'Delete');
+  deleteButton.emit('clicked', 1);
+  await until(() => palette._mode === 'history-list');
+  await pause(400);
+  report('history-delete-removes-row', palette._writingContent.get_children()
+    .filter(c => c.has_style_class_name?.('gdi-history-row')).length === rowsBeforeDelete.length - 1);
+  const clearButton = palette._writingControls.get_children().find(b => b.label === 'Clear All');
+  clearButton.emit('clicked', 1);
+  report('history-clear-arms-confirm', clearButton.label === 'Really clear all?');
+  clearButton.emit('clicked', 1);
+  await pause(400);
+  report('history-clear-empties-list', !palette._writingContent.get_children()
+    .some(c => c.has_style_class_name?.('gdi-history-row')));
+  // Disabled history: Ask interactions stay temporary and create no junk.
+  palette.close(); await pause(180);
+  palette._settings.set_boolean('save-intelligence-history', false);
+  palette.open(); palette._entry.set_text('ask EchoFixture: temporary fixture question');
+  await until(() => palette._items[0]?.type === 'ask' && !palette._items[0].promptOnly);
+  palette._activateItem(0);
+  await until(() => palette._mode === 'writing-result');
+  report('history-disabled-no-conversation', palette._conversationId === null);
+  palette._settings.set_boolean('save-intelligence-history', true);
+  palette.close(); await pause(180);
   // Ask semantics: a bare 'ask' enters the empty prompt and never requests.
+  palette.open();
   palette._entry.set_text('ask');
   await until(() => palette._items[0]?.type === 'ask' && palette._items[0].promptOnly === true);
   report('ask-bare-row-prompt-only', true);
@@ -278,6 +366,23 @@ export async function validateIntelligence(palette, report) {
       context.capabilities.canReadSelection === true && context.capabilities.role.length > 0);
     palette.open(context);
     await pause(180);
+    report('writing-tools-primary', palette._mode === 'writing-actions' &&
+      chipLabels() === 'Improve,Fix,Shorten,Tone,More…');
+    report('writing-tools-selection-preview', palette._writingContent.get_children().some(c =>
+      (c.text ?? '').includes('selected phrase')));
+    const findChip = label => palette._writingControls.get_children().find(button => button.label === label);
+    findChip('Tone').emit('clicked', 1);
+    await pause(100);
+    report('writing-tools-tone-submenu', chipLabels() === 'Professional,Casual,Friendly,Direct,Back');
+    findChip('Back').emit('clicked', 1);
+    await pause(100);
+    findChip('More…').emit('clicked', 1);
+    await pause(100);
+    report('writing-tools-more-submenu', chipLabels() === 'Expand,Summarize,Explain,Translate,Ask Intelligence,Back');
+    findChip('Back').emit('clicked', 1);
+    await pause(100);
+    // Typed selection intents still select the action; the verb is stripped
+    // and bare prompts return here on Escape.
     palette._entry.set_text('explain this');
     await until(() => palette._items[0]?.type === 'selection-intent');
     report('selection-natural-intent', palette._items[0]?.actionKey === 'explain');
@@ -285,6 +390,7 @@ export async function validateIntelligence(palette, report) {
     await until(() => palette._mode === 'writing-result');
     report('selection-context-transparent', palette._writingContent.get_children().some(c => c.text?.includes('Using selected text')));
     palette._showWritingActions();
+    await pause(100);
     palette._entry.set_text('explain EchoFixture: explain-remainder');
     await until(() => palette._items[0]?.type === 'selection-intent' &&
       palette._items[0].query === 'EchoFixture: explain-remainder');
@@ -292,15 +398,20 @@ export async function validateIntelligence(palette, report) {
     await until(() => palette._mode === 'writing-result');
     report('selection-intent-verb-stripped', palette._writingSuggestion === 'explain-remainder');
     palette._showWritingActions();
+    await pause(100);
     palette._entry.set_text('ask');
     await until(() => palette._items[0]?.type === 'selection-intent' && palette._items[0].promptOnly === true);
     palette._activateItem(0);
     report('selection-ask-bare-enters-question-prompt', palette._mode === 'writing-question');
-    palette._showWritingActions();
-    palette._activateItem(0);
-    await until(() => palette._mode === 'writing-result' || palette._mode === 'writing-error');
+    await nativeKey('escape'); await pause(120);
+    report('writing-tools-escape-returns-from-question', palette._mode === 'writing-actions');
+    findChip('Improve').emit('clicked', 1);
+    await until(() => palette._mode === 'writing-result');
+    report('writing-tools-preview-transition', palette._mode === 'writing-result' &&
+      palette._writingControls.get_first_child().label === 'Replace');
+    report('writing-tools-preview-diff', palette._writingContent.get_children().some(c =>
+      c.has_style_class_name?.('gdi-diff-section')));
     await capture('phase35-writing-diff');
-    report('writing-preview-replace', palette._mode === 'writing-result' && palette._writingControls.get_first_child().label === 'Replace');
     await nativeKey('tab'); await pause(80);
     report('preview-tab-navigation', global.stage.get_key_focus()?.label === 'Copy');
     await nativeKey('backtab'); await pause(80);
@@ -322,10 +433,18 @@ export async function validateIntelligence(palette, report) {
     const insertContext = await new Promise((resolve, reject) => captureFocusedContext(pid, (reply, error) => {
       if (error) { reject(error); return; }
       const [token, selected, nearby, application, role, start, end, caret, editable] = reply;
-      resolve({token, selected, nearby, application, role, start, end, caret, editable});
+      let capabilities = null;
+      try { capabilities = JSON.parse(reply[9] ?? 'null'); } catch { capabilities = null; }
+      resolve({token, selected, nearby, application, role, start, end, caret, editable, capabilities});
     }));
     report('insertion-caret-snapshot', insertContext.editable && insertContext.start === insertContext.end && !insertContext.selected && !insertContext.nearby);
     palette.open(insertContext);
+    await pause(120);
+    // No selection but the field exposes caret context: the contextual
+    // surface offers caret-scoped actions only.
+    report('contextual-writing-surface', palette._mode === 'writing-actions' &&
+      chipLabels() === 'Improve sentence,Continue writing,Fix paragraph,Tone,More…');
+    palette._showContextualWritingActions();
     palette._entry.set_text('Markdown fixture');
     await until(() => palette._items[0]?.type === 'ask');
     palette._activateItem(0);

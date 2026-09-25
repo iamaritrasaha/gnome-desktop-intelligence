@@ -19,21 +19,33 @@ import { calculateExpression } from './src/search/Calculator.js';
 import { searchApps } from './src/search/AppSearch.js';
 import { cancelFileSearch, searchFiles } from './src/search/FileSearch.js';
 import {
+  acceptPrediction,
   actionStats,
   cancelTransform,
+  captureCaretContext,
   captureFocusedContext,
   errorMessage,
-  releaseContext,
+  historyAdd,
+  historyClear,
+  historyDelete,
+  historyGet,
+  historyList,
+  historyRename,
+  historyStart,
+  historyTrim,
   recordSignal,
+  recordActionDiagnostic,
   recordActionUse,
+  releaseContext,
   replaceSelection,
   transform,
   streamTransform,
   undoReplacement,
 } from './src/intelligence/ServiceClient.js';
 
-import { askQueryRemainder, isResponse, preferAssistant, selectionIntent, selectionIntentParts } from './src/intelligence/Presentation.js';
-import { addDiff, addMarkdown } from './src/intelligence/ResponseView.js';
+import { askQueryRemainder, historyGroups, isResponse, preferAssistant, selectionIntent, selectionIntentParts } from './src/intelligence/Presentation.js';
+import { addDiff, addMarkdown, StreamRenderer } from './src/intelligence/ResponseView.js';
+import { MORE_ACTIONS, TONE_ACTIONS, writingMenuFor } from './src/intelligence/WritingMenu.js';
 import { parseActionPlan, parseFileQuery } from './src/actions/parser.js';
 import {
   executePlan,
@@ -53,19 +65,17 @@ const PALETTE_FIXED_HEIGHT = 56;
 // Four 48px rows plus result spacing/padding, matching the scroll viewport.
 const LAUNCHER_RESULTS_HEIGHT = 194;
 
-const WRITING_ACTIONS = [
-  { key: 'proofread', label: 'Fix grammar' },
-  { key: 'rewrite', label: 'Improve writing' },
-  { key: 'concise', label: 'Make concise' },
-  { key: 'expand', label: 'Expand' },
-  { key: 'professional', label: 'Professional' },
-  { key: 'casual', label: 'Casual' },
-  { key: 'explain', label: 'Explain' },
-  { key: 'summarize', label: 'Summarize' },
-  { key: 'keypoints', label: 'Key points' },
-  { key: 'translate', label: 'Translate' },
-  { key: 'ask', label: 'Ask about selection' },
-];
+const HISTORY_COMMAND = /^history$/i;
+const HISTORY_LABELS = ['Today', 'Yesterday', 'Earlier'];
+const HISTORY_LIST_LIMIT = 60;
+
+const ACTION_LABELS = {
+  proofread: 'Fix grammar', rewrite: 'Improve writing', concise: 'Make concise',
+  expand: 'Expand', professional: 'Professional', casual: 'Casual',
+  friendly: 'Friendly', direct: 'Direct', continue: 'Continue writing',
+  summarize: 'Summarize', keypoints: 'Key points', explain: 'Explain',
+  translate: 'Translate', ask: 'Ask Intelligence', assistant: 'Ask Intelligence',
+};
 
 export class LauncherPalette {
   constructor(settings, intelligenceIcon, visibilityChanged = () => {}, openSettings = () => {}) {
@@ -90,6 +100,10 @@ export class LauncherPalette {
     this._writingGeneration = 0;
     this._lastTransform = null;
     this._undoAvailable = false;
+    this._submenu = null;
+    this._conversationId = null;
+    this._historyConversation = null;
+    this._historyClearArmed = false;
     this._motionSettings = new Gio.Settings({
       schema_id: 'org.gnome.desktop.interface',
     });
@@ -232,11 +246,15 @@ export class LauncherPalette {
       this.open();
   }
 
+  openHistory() {
+    this.open(null, {history: true});
+  }
+
   get isOpen() {
     return this._isOpen;
   }
 
-  open(context = null) {
+  open(context = null, { history = false } = {}) {
     if (this._isOpen || this._isDestroyed)
       return;
 
@@ -253,9 +271,15 @@ export class LauncherPalette {
     this._clearResults();
     this._writingContext = context;
     this._targetWindow = global.display.focus_window;
-    if (context?.selected) {
+    if (history) {
+      this._showHistoryList();
+    } else if (context?.selected) {
       this._writingContext = context;
       this._showWritingActions();
+    } else if (context?.capabilities?.canReadCaretContext && context?.editable) {
+      // No selection, but the focused field exposes caret context: offer the
+      // contextual writing surface instead of an empty launcher.
+      this._showContextualWritingActions();
     } else {
       this._mode = 'launcher';
       this._searchRow.show();
@@ -515,12 +539,17 @@ export class LauncherPalette {
     const widthLimit = PALETTE_WIDTH;
     const width = Math.min(widthLimit, availableWidth);
     this._palette.set_width(width);
-    if (this._mode.startsWith('writing-')) {
+    if (this._mode.startsWith('writing-') || this._mode.startsWith('history-')) {
       const anchor = this._calculatePlacement(monitor, PALETTE_FIXED_HEIGHT, Main.panel.height);
       const available = monitor.y + monitor.height - BOTTOM_GUTTER - anchor.y;
       this._writingControls.vertical = width < 420;
       const controlsHeight = this._writingControls.get_preferred_height(width - 16)[1];
-      const cap = Math.max(40, Math.min(310, available - Math.max(64, controlsHeight + (this._followup.visible ? 64 : 16))));
+      // Height is dynamic: short answers stay compact, long answers grow to
+      // a work-area-relative maximum and then scroll internally. The top
+      // edge, horizontal center and the fixed 500px width never move.
+      const workAreaMax = Math.min(520, Math.max(220, Math.round(available * 0.6)));
+      const cap = Math.max(40, Math.min(workAreaMax,
+        available - Math.max(64, controlsHeight + (this._followup.visible ? 64 : 16))));
       const contentHeight = this._writingContent.get_preferred_height(Math.max(1, width - 32))[1];
       this._writingScroll.height = Math.min(cap, Math.max(40, contentHeight));
     }
@@ -562,8 +591,7 @@ export class LauncherPalette {
 
     if (!query) {
       if (this._mode === 'writing-actions') {
-        this._setResults(WRITING_ACTIONS.map(action => ({type: 'writing-action', name: _(action.label),
-          actionKey: action.key, icon: this._intelligenceIcon})), WRITING_ACTIONS.length);
+        this._renderWritingChips(this._currentMenuItems ?? []);
         return;
       }
       this._clearResults();
@@ -580,13 +608,23 @@ export class LauncherPalette {
   }
 
   _search(query, generation) {
-    if (this._mode === 'writing-actions') {
-      // The typed verb selects the action; only the remainder may reach a model.
+    // With a selection, the typed verb selects the action and only the
+    // remainder may reach a model. On the contextual (no-selection) surface
+    // typed queries keep plain launcher routing; the caret-scoped chips are
+    // the explicit contextual path.
+    if (this._mode === 'writing-actions' && this._writingContext?.selected) {
       const {action, remainder} = selectionIntentParts(query);
-      const label = _(WRITING_ACTIONS.find(a => a.key === action)?.label ?? 'Ask about selection');
+      const label = _(ACTION_LABELS[action] ?? 'Ask Intelligence');
       this._setResults([{type: 'selection-intent', name: label,
         query: remainder, actionKey: action, promptOnly: action === 'ask' && !remainder,
         icon: this._intelligenceIcon}]);
+      return;
+    }
+    if (HISTORY_COMMAND.test(query.trim())) {
+      this._setResults([{
+        type: 'history-open', name: _('Intelligence History'),
+        icon: this._intelligenceIcon,
+      }]);
       return;
     }
     const webMatch = query.match(/^search\s+(.+)$/i);
@@ -969,8 +1007,57 @@ export class LauncherPalette {
   _stopStream() {
     this._disposeStream?.();
     this._disposeStream = null;
+    this._streamRenderer?.destroy();
+    this._streamRenderer = null;
+    this._streamTailLabel = null;
     if (this._streamTimer) GLib.source_remove(this._streamTimer);
     this._streamTimer = 0;
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Intelligence processing animation.                                 */
+  /* ---------------------------------------------------------------- */
+
+  _startProcessing() {
+    this._stopProcessing();
+    const processing = new St.BoxLayout({
+      style_class: 'gdi-processing', x_expand: true,
+    });
+    processing.add_child(new St.Icon({
+      gicon: this._intelligenceIcon, icon_size: 14, style_class: 'gdi-processing-mark',
+    }));
+    const dots = ['·', '·', '·'].map(() => {
+      const dot = new St.Label({text: '·', style_class: 'gdi-processing-dot'});
+      processing.add_child(dot);
+      return dot;
+    });
+    this._writingContent.add_child(processing);
+    this._processing = processing;
+    if (!this._animationsEnabled) {
+      dots.forEach(dot => { dot.opacity = 200; });
+      return;
+    }
+    let phase = 0;
+    const pulse = () => {
+      if (!this._processing)
+        return GLib.SOURCE_REMOVE;
+      dots.forEach((dot, index) => {
+        dot.opacity = index === phase % 3 ? 255 : 90;
+      });
+      phase += 1;
+      return GLib.SOURCE_CONTINUE;
+    };
+    dots[0].opacity = 255;
+    this._processingTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 320, pulse);
+  }
+
+  _stopProcessing() {
+    if (this._processingTimer) {
+      GLib.source_remove(this._processingTimer);
+      this._processingTimer = 0;
+    }
+    this._processing?.destroy();
+    this._processing = null;
   }
 
   _showCaptureStatus(context) {
@@ -994,8 +1081,13 @@ export class LauncherPalette {
 
   _resetWritingState() {
     this._stopStream();
+    this._stopProcessing();
     this._conversation = [];
     this._requestHistory = [];
+    this._conversationId = null;
+    this._submenu = null;
+    this._historyConversation = null;
+    this._historyClearArmed = false;
     this._followup.hide();
     this._launcherNote.hide();
     this._pendingPlan = null;
@@ -1019,24 +1111,382 @@ export class LauncherPalette {
     this._searchIcon.gicon = this._intelligenceIcon;
   }
 
+  /* ---------------------------------------------------------------- */
+  /* Compact contextual Writing Tools surface.                          */
+  /* ---------------------------------------------------------------- */
+
   _showWritingActions() {
     if (!this._writingContext?.selected)
       return;
     this._mode = 'writing-actions';
+    this._submenu = null;
     this._searchRow.show();
-    this._writingView.hide();
+    this._writingView.show();
     this._launcherNote.hide();
     this._entry.hint_text = _('Writing tools for selected text');
     this._searchIcon.gicon = this._intelligenceIcon;
     this._entry.set_text('');
     this._clearResults();
-    this._setResults(WRITING_ACTIONS.map(action => ({
-      type: 'writing-action',
-      name: _(action.label),
-      actionKey: action.key,
-      icon: this._intelligenceIcon,
-    })), WRITING_ACTIONS.length);
+    this._palette.add_style_class_name('gdi-ai-mode');
+    this._writingContent.destroy_all_children();
+    this._writingControls.destroy_all_children();
+    const preview = this._writingContext.selected.replace(/\s+/g, ' ').trim();
+    if (preview) {
+      const label = new St.Label({
+        style_class: 'gdi-writing-preview', x_expand: true,
+        text: preview.slice(0, 160) + (preview.length > 160 ? '…' : ''),
+      });
+      label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+      this._writingContent.add_child(label);
+    }
+    this._renderWritingChips(writingMenuFor({
+      selected: true, capabilities: this._writingContext.capabilities,
+    }));
     this._schedulePosition();
+  }
+
+  _showContextualWritingActions() {
+    this._mode = 'writing-actions';
+    this._submenu = null;
+    this._searchRow.show();
+    this._writingView.show();
+    this._launcherNote.hide();
+    this._entry.hint_text = _('Writing tools for this field');
+    this._searchIcon.gicon = this._intelligenceIcon;
+    this._entry.set_text('');
+    this._clearResults();
+    this._palette.add_style_class_name('gdi-ai-mode');
+    this._writingContent.destroy_all_children();
+    this._writingControls.destroy_all_children();
+    const note = new St.Label({
+      text: _('No selection. Actions use the sentence or paragraph at the caret.'),
+      style_class: 'gdi-context-note', x_expand: true,
+    });
+    note.clutter_text.line_wrap = true;
+    note.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+    this._writingContent.add_child(note);
+    this._renderWritingChips(writingMenuFor({
+      selected: false, capabilities: this._writingContext?.capabilities ?? null,
+    }));
+    this._schedulePosition();
+  }
+
+  _renderWritingChips(items) {
+    this._currentMenuItems = items;
+    this._writingControls.destroy_all_children();
+    this._writingControls.vertical = false;
+    for (const item of items) {
+      const button = new St.Button({
+        style_class: 'button flat gdi-writing-chip',
+        label: _(item.label),
+        can_focus: true,
+      });
+      button.connect('clicked', () => this._activateWritingMenuItem(item));
+      this._writingControls.add_child(button);
+    }
+    if (this._submenu) {
+      const back = new St.Button({
+        style_class: 'button flat gdi-writing-chip gdi-writing-chip-back',
+        label: _('Back'), can_focus: true,
+      });
+      back.connect('clicked', () => {
+        this._submenu = null;
+        this._showWritingMenuRoot();
+      });
+      this._writingControls.add_child(back);
+    }
+    this._schedulePosition();
+    const first = this._writingControls.get_first_child();
+    if (first)
+      global.stage.set_key_focus(first);
+  }
+
+  _showWritingMenuRoot() {
+    const items = writingMenuFor({
+      selected: Boolean(this._writingContext?.selected),
+      capabilities: this._writingContext?.capabilities ?? null,
+    });
+    this._writingContent.destroy_all_children();
+    if (this._writingContext?.selected) {
+      const preview = this._writingContext.selected.replace(/\s+/g, ' ').trim();
+      const label = new St.Label({
+        style_class: 'gdi-writing-preview', x_expand: true,
+        text: preview.slice(0, 160) + (preview.length > 160 ? '…' : ''),
+      });
+      label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+      this._writingContent.add_child(label);
+    } else {
+      const note = new St.Label({
+        text: _('No selection. Actions use the sentence or paragraph at the caret.'),
+        style_class: 'gdi-context-note', x_expand: true,
+      });
+      note.clutter_text.line_wrap = true;
+      note.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+      this._writingContent.add_child(note);
+    }
+    this._renderWritingChips(items);
+  }
+
+  _activateWritingMenuItem(item) {
+    if (item.key === 'tone' || item.key === 'more') {
+      this._submenu = item.key;
+      this._renderWritingChips(item.children ?? []);
+      return;
+    }
+    this._submenu = null;
+    if (this._writingContext?.selected) {
+      this._selectWritingAction({...item, actionLabel: _(item.label)});
+      return;
+    }
+    this._startContextualAction(item);
+  }
+
+  _startContextualAction(item) {
+    if (!this._writingContext && !this._targetWindow) {
+      this._showContextualError(_('No supported editable field was captured. Select text or click into an editor.'));
+      return;
+    }
+    this._writingAction = {key: item.key, label: _(item.label), contextual: true, scope: item.scope ?? 'sentence'};
+    // Questions need an answer before any capture happens.
+    if (item.key === 'ask' || item.key === 'translate') {
+      this._enterQuestionPrompt(item.key === 'translate'
+        ? _('Translate into which language?')
+        : _('Ask about the text at the caret…'));
+      return;
+    }
+    this._captureThenStart(item.key === 'continue' ? 'continue' : item.scope ?? 'sentence', '');
+  }
+
+  _captureThenStart(kind, question) {
+    const pid = this._targetWindow?.get_pid() ?? 0;
+    captureCaretContext(pid, kind, (reply, error) => {
+      if (!this._isOpen)
+        return;
+      if (error || !reply?.[0] || !reply[1]) {
+        // Never a silent no-op: explain and stay on the contextual surface.
+        this._showContextualError(error
+          ? errorMessage(error)
+          : _('The text at the caret could not be read here.'));
+        return;
+      }
+      releaseContext(this._writingContext?.token);
+      const [token, selected, nearby, application, role, start, end, caret, editable] = reply;
+      let capabilities = null;
+      try { capabilities = JSON.parse(reply[9] ?? 'null'); } catch { capabilities = null; }
+      this._writingContext = {
+        token, selected, nearby, application, role, start, end, caret, editable,
+        capabilities, insert: kind === 'continue',
+      };
+      recordSignal(token, this._writingAction?.key ?? 'rewrite', 'action_selected',
+        this._learningEnabled());
+      this._startWritingRequest(this._writingAction, question);
+    });
+  }
+
+  _showContextualError(message) {
+    this._mode = 'writing-actions';
+    this._writingContent.destroy_all_children();
+    this._writingControls.destroy_all_children();
+    const label = new St.Label({text: message, style_class: 'gdi-writing-error', x_expand: true});
+    label.clutter_text.line_wrap = true;
+    label.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+    this._writingContent.add_child(label);
+    this._renderWritingChips(this._currentMenuItems ?? []);
+    this._schedulePosition();
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Intelligence history: local, grouped, resumable conversations.     */
+  /* ---------------------------------------------------------------- */
+
+  _showHistoryList() {
+    releaseContext(this._writingContext?.token);
+    this._writingContext = null;
+    this._historyConversation = null;
+    this._historyClearArmed = false;
+    this._mode = 'history-list';
+    this._searchRow.hide();
+    this._clearResults();
+    this._writingContent.destroy_all_children();
+    this._writingControls.destroy_all_children();
+    this._followup.hide();
+    this._writingView.show();
+    this._writingScroll.show();
+    this._palette.add_style_class_name('gdi-ai-mode');
+    this._addWritingHeading(_('Intelligence History'));
+    this._addWritingButton(_('Clear All'), () => this._clearAllHistory(), true);
+    this._addWritingButton(_('Close'), () => this.close(), true);
+    const loading = new St.Label({text: _('Loading…'), style_class: 'gdi-context-note', x_expand: true});
+    this._writingContent.add_child(loading);
+    this._schedulePosition();
+    historyList().then(conversations => {
+      if (!this._isOpen || this._mode !== 'history-list')
+        return;
+      this._historyItems = (conversations ?? []).slice(0, HISTORY_LIST_LIMIT);
+      this._renderHistoryRows();
+    }).catch(() => {
+      if (!this._isOpen || this._mode !== 'history-list')
+        return;
+      this._writingContent.destroy_all_children();
+      const note = new St.Label({
+        text: _('History is unavailable right now.'), style_class: 'gdi-writing-error', x_expand: true,
+      });
+      note.clutter_text.line_wrap = true;
+      note.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+      this._writingContent.add_child(note);
+      this._schedulePosition();
+    });
+  }
+
+  _renderHistoryRows() {
+    this._writingContent.destroy_all_children();
+    this._addWritingHeading(_('Intelligence History'));
+    const groups = historyGroups(this._historyItems);
+    let shown = 0;
+    for (const label of HISTORY_LABELS) {
+      const conversations = groups[label] ?? [];
+      if (!conversations.length)
+        continue;
+      this._writingContent.add_child(new St.Label({
+        text: _(label), style_class: 'gdi-history-group', x_expand: true,
+      }));
+      for (const conversation of conversations) {
+        const row = new St.Button({
+          style_class: 'button flat gdi-history-row', can_focus: true, x_expand: true,
+        });
+        const box = new St.BoxLayout({vertical: true, x_expand: true});
+        const title = new St.Label({
+          text: conversation.title, style_class: 'gdi-history-title', x_expand: true,
+        });
+        title.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+        const detail = new St.Label({
+          text: `${conversation.messageCount} ${conversation.messageCount === 1 ? 'message' : 'messages'} · ${conversation.preview}`,
+          style_class: 'gdi-history-detail', x_expand: true,
+        });
+        detail.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+        box.add_child(title);
+        box.add_child(detail);
+        row.set_child(box);
+        row.connect('clicked', () => this._openHistoryConversation(conversation.id));
+        this._writingContent.add_child(row);
+        shown += 1;
+      }
+    }
+    if (!shown) {
+      this._writingContent.add_child(new St.Label({
+        text: _('No saved conversations yet.'), style_class: 'gdi-context-note', x_expand: true,
+      }));
+    }
+    this._schedulePosition();
+    const first = this._writingControls.get_first_child();
+    if (first)
+      global.stage.set_key_focus(first);
+  }
+
+  _openHistoryConversation(id) {
+    historyGet(id).then(conversation => {
+      if (!this._isOpen || !conversation?.id)
+        return;
+      this._mode = 'history-conversation';
+      this._historyConversation = conversation;
+      this._writingContent.destroy_all_children();
+      this._writingControls.destroy_all_children();
+      this._addWritingHeading(conversation.title || _('Conversation'));
+      for (const message of conversation.messages ?? []) {
+        if (message.role === 'user') {
+          const label = new St.Label({
+            style_class: 'gdi-ask-question', x_expand: true, text: message.content,
+          });
+          label.clutter_text.line_wrap = true;
+          label.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+          label.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+          this._writingContent.add_child(label);
+        } else {
+          addMarkdown(this._writingContent, message.content);
+        }
+      }
+      // Continuing resumes the same persisted conversation; the loaded turns
+      // also become the bounded RAM context for the next model request.
+      this._conversation = (conversation.messages ?? [])
+        .map(message => ({role: message.role, content: String(message.content).slice(0, 4000)}));
+      while (this._conversation.length > 6 ||
+             this._conversation.reduce((n, turn) => n + turn.content.length, 0) > 6000)
+        this._conversation.shift();
+      this._conversationId = conversation.id;
+      this._addWritingButton(_('Continue'), () => {
+        this._followup.show();
+        global.stage.set_key_focus(this._followup);
+        this._schedulePosition();
+      }, false);
+      this._addWritingButton(_('Rename'), () => this._startHistoryRename(), true);
+      this._addWritingButton(_('Delete'), () => {
+        historyDelete(id).then(() => {
+          if (this._isOpen && (this._mode === 'history-conversation' || this._mode === 'history-list'))
+            this._showHistoryList();
+        }).catch(() => {
+          if (this._isOpen)
+            this._showHistoryList();
+        });
+      }, true);
+      this._addWritingButton(_('Back'), () => this._showHistoryList(), true);
+      this._followup.show();
+      this._schedulePosition();
+      const first = this._writingControls.get_first_child();
+      if (first)
+        global.stage.set_key_focus(first);
+    }).catch(() => {
+      if (this._isOpen && this._mode === 'history-conversation')
+        this._showHistoryList();
+    });
+  }
+
+  _startHistoryRename() {
+    if (!this._historyConversation)
+      return;
+    this._mode = 'history-rename';
+    this._entry.hint_text = _('New title…');
+    this._entry.set_text(this._historyConversation.title ?? '');
+    this._clearResults();
+    global.stage.set_key_focus(this._entry);
+    this._schedulePosition();
+  }
+
+  _clearAllHistory() {
+    if (!this._historyClearArmed) {
+      this._historyClearArmed = true;
+      const button = this._writingControls.get_children().find(child => child.label === _('Clear All'));
+      if (button)
+        button.label = _('Really clear all?');
+      return;
+    }
+    this._historyClearArmed = false;
+    historyClear((_reply, _error) => {
+      if (this._isOpen && this._mode === 'history-list') {
+        this._historyItems = [];
+        this._renderHistoryRows();
+      }
+    });
+    const button = this._writingControls.get_children().find(child => child.label === _('Really clear all?'));
+    if (button)
+      button.label = _('Clear All');
+  }
+
+  _selectWritingAction(item) {
+    if (!this._writingContext?.selected)
+      return;
+    this._writingAction = {key: item.key, label: item.actionLabel ?? _(item.label)};
+    this._writingQuestion = '';
+    recordSignal(this._writingContext.token, item.key, 'action_selected',
+      this._learningEnabled());
+
+    if (item.key === 'ask' || item.key === 'translate') {
+      this._enterQuestionPrompt(item.key === 'translate'
+        ? _('Translate into which language?')
+        : _('Ask a question about this selection…'));
+      return;
+    }
+
+    this._startWritingRequest(this._writingAction, '');
   }
 
   _enterQuestionPrompt(hint) {
@@ -1050,27 +1500,18 @@ export class LauncherPalette {
     this._schedulePosition();
   }
 
-  _selectWritingAction(item) {
-    const action = WRITING_ACTIONS.find(candidate => candidate.key === item.actionKey);
-    if (!action || !this._writingContext?.selected)
-      return;
-    this._writingAction = { ...action, label: _(action.label) };
-    this._writingQuestion = '';
-    recordSignal(this._writingContext.token, action.key, 'action_selected',
-      this._learningEnabled());
-
-    if (action.key === 'ask' || action.key === 'translate') {
-      this._enterQuestionPrompt(action.key === 'translate'
-        ? _('Translate into which language?')
-        : _('Ask a question about this selection…'));
-      return;
-    }
-
-    this._startWritingRequest(action, '');
+  _startWritingRequest(action, question) {
+    // Async body errors must surface as a visible failed state, never as a
+    // rejected promise nobody awaits.
+    return this._runWritingRequest(action, question).catch(error => {
+      console.warn(`GDI writing request failed: ${error.message}\n${error.stack}`);
+      this._renderWritingResult('', errorMessage(error));
+    });
   }
 
-  _startWritingRequest(action, question) {
-    if (!action || (!this._writingContext?.selected && action.key !== 'assistant'))
+  async _runWritingRequest(action, question) {
+    if (!action || (!this._writingContext?.selected && !(this._writingContext?.start >= 0) &&
+        action.key !== 'assistant'))
       return;
     if ((action.key === 'ask' || action.key === 'translate') && !question.trim()) {
       // Never a silent no-op: fall back to the question prompt.
@@ -1080,7 +1521,7 @@ export class LauncherPalette {
         : _('Ask a question about this selection…'));
       return;
     }
-    if (this._mode === 'writing-loading' && !this._disposeStream) cancelTransform(this._writingContext.token);
+    if (this._mode === 'writing-loading' && !this._disposeStream) cancelTransform(this._writingContext?.token);
     this._stopStream();
     this._followup.hide();
     this._followup.set_text('');
@@ -1093,29 +1534,56 @@ export class LauncherPalette {
     const generation = this._writingGeneration;
     this._searchRow.hide();
     this._clearResults();
+    this._submenu = null;
     this._palette.add_style_class_name('gdi-ai-mode');
     this._writingContent.destroy_all_children();
     this._writingControls.destroy_all_children();
     this._writingScroll.show();
     this._writingView.show();
-    this._addWritingHeading(_('Generating…'));
+    this._addWritingHeading(action.actionLabel ?? _(action.label));
     this._addContextNotice();
-    this._streamText = '';
-    this._streamLabel = null;
+    // No raw Markdown or "Generating…" text while waiting: a small native
+    // processing animation holds the surface until real content arrives.
+    this._startProcessing();
     this._addWritingButton(_('Cancel'), () => {
-      cancelTransform(this._writingContext.token);
+      cancelTransform(this._writingContext?.token);
       this._stopStream();
+      this._stopProcessing();
       this._writingGeneration++;
       this._renderWritingResult('', _('Generation cancelled.'));
     }, true);
     global.stage.set_key_focus(this._writingControls.get_first_child());
     this._positionPalette();
+    this._streamText = '';
+
+    // Every Ask interaction belongs to a conversation. The user turn is
+    // stored when the question is submitted; the service stores the answer
+    // on completion. History stays local, and a failure never blocks the
+    // request — it only means the turn is not persisted.
+    let conversationId = '';
+    if (isResponse(action.key) && this._historyEnabled()) {
+      try {
+        if (!this._conversationId)
+          this._conversationId = await historyStart(this._settings.get_string('model-assistant'));
+        conversationId = this._conversationId ?? '';
+        if (conversationId && this._writingQuestion) {
+          historyAdd(conversationId, 'user', this._writingQuestion).catch(() =>
+            recordActionDiagnostic({kind: 'history', conversation: conversationId,
+              role: 'user', status: 'failed'}));
+        }
+      } catch {
+        this._conversationId = null;
+        conversationId = '';
+      }
+    }
+    if (!this._isOpen || generation !== this._writingGeneration)
+      return;
 
     const request = {
-      token: this._writingContext.token,
+      token: this._writingContext?.token ?? GLib.uuid_string_random(),
       action: action.key,
-      selected: this._writingContext.selected,
-      nearby: this._writingContext.nearby,
+      selected: this._writingContext?.selected ?? '',
+      nearby: this._writingContext?.nearby ?? '',
       question: this._writingQuestion,
       provider: this._settings.get_string('model-provider'),
       endpoint: this._settings.get_string('model-endpoint'),
@@ -1127,6 +1595,7 @@ export class LauncherPalette {
       contextTokens: this._settings.get_int('context-tokens'),
       outputTokens: this._settings.get_int('output-tokens'),
       history: isResponse(action.key) ? this._requestHistory ?? [] : [],
+      conversationId,
     };
     const completed = (reply, error) => {
       if (!this._isOpen || generation !== this._writingGeneration)
@@ -1147,19 +1616,16 @@ export class LauncherPalette {
     if (isResponse(action.key)) {
       this._disposeStream = streamTransform(request, delta => {
         if (!this._isOpen || generation !== this._writingGeneration) return;
+        // First real content arrived: leave the processing animation.
+        this._stopProcessing();
         this._streamText = (this._streamText + delta).slice(0, 20000);
         if (this._streamTimer) return;
         this._streamTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 80, () => {
           this._streamTimer = 0;
           if (!this._isOpen || generation !== this._writingGeneration) return GLib.SOURCE_REMOVE;
-          if (!this._streamLabel) {
-            this._streamLabel = new St.Label({style_class: 'gdi-writing-text', x_expand: true});
-            this._streamLabel.clutter_text.line_wrap = true;
-            this._streamLabel.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
-            this._streamLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
-            this._writingContent.add_child(this._streamLabel);
-          }
-          this._streamLabel.text = this._streamText;
+          if (!this._streamRenderer)
+            this._streamRenderer = new StreamRenderer(this._writingContent);
+          this._streamRenderer.update(this._streamText);
           this._schedulePosition();
           return GLib.SOURCE_REMOVE;
         });
@@ -1181,6 +1647,7 @@ export class LauncherPalette {
 
   _renderWritingResult(suggestion, error) {
     this._stopStream();
+    this._stopProcessing();
     this._followup.hide();
     this._mode = error ? 'writing-error' : 'writing-result';
     this._searchRow.hide();
@@ -1202,8 +1669,17 @@ export class LauncherPalette {
       message.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
       this._writingContent.add_child(message);
     }
-    this._addContextNotice();
     const response = isResponse(this._writingAction.key);
+    if (response && this._writingQuestion) {
+      // The user's own question stays visible but subdued above the answer.
+      const asked = new St.Label({
+        style_class: 'gdi-ask-question', x_expand: true,
+        text: this._writingQuestion.replace(/\s+/g, ' ').slice(0, 200),
+      });
+      asked.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+      this._writingContent.add_child(asked);
+    }
+    this._addContextNotice();
     if (suggestion) {
       if (response) addMarkdown(this._writingContent, suggestion);
       else addDiff(this._writingContent, this._writingContext.selected, suggestion);
@@ -1214,7 +1690,9 @@ export class LauncherPalette {
     if (suggestion && response)
       this._addWritingButton(_('Copy'), () => this._copyWritingResult(), true);
     if (suggestion && !error && this._isReplaceable(this._writingAction.key))
-      this._addWritingButton(!this._writingContext.selected ? _('Insert at caret') : response ? _('Replace selection') : _('Replace'), () => this._replaceWritingSelection(), response);
+      this._addWritingButton(!this._writingContext.selected || this._writingContext.insert
+        ? _('Insert at caret')
+        : response ? _('Replace selection') : _('Replace'), () => this._replaceWritingSelection(), response);
     if (suggestion && !response)
       this._addWritingButton(_('Copy'), () => this._copyWritingResult(), true);
     if (error && this._writingContext?.selected) {
@@ -1222,6 +1700,8 @@ export class LauncherPalette {
         St.ClipboardType.CLIPBOARD, this._writingContext.selected), true);
     }
     if (!error || !suggestion) this._addWritingButton(_('Retry'), () => {
+      if (response && this._conversationId)
+        historyTrim(this._conversationId, 'assistant').catch(() => {});
       this._startWritingRequest(this._writingAction, this._writingQuestion);
     }, true);
     if (error && !suggestion && error !== _('Generation cancelled.')) this._addWritingButton(_('AI Settings'), () => { this.close(); this._openSettings(); }, true);
@@ -1293,6 +1773,14 @@ export class LauncherPalette {
     return this._writingContext?.editable === true && (Boolean(this._writingContext?.selected) || this._writingContext?.start >= 0);
   }
 
+  _historyEnabled() {
+    try {
+      return this._settings.get_boolean('save-intelligence-history');
+    } catch (_error) {
+      return false;
+    }
+  }
+
   _capabilityNotice() {
     const caps = this._writingContext?.capabilities;
     if (!caps)
@@ -1353,7 +1841,7 @@ export class LauncherPalette {
         this._undoAvailable = true;
         this._renderReplacementComplete(reply[1]);
       });
-    if (context.selected) { replace(); return; }
+    if (context.selected && !context.insert) { replace(); return; }
     // A Shell modal grab temporarily removes Wayland keyboard focus from the
     // editor. Release it before insertion so AT-SPI can verify the focused field.
     // Never activate a different window or synthesize a key to restore focus.
@@ -1451,7 +1939,7 @@ export class LauncherPalette {
       return _('Action');
     case 'action-searching':
       return '';
-    case 'writing-action':
+    case 'history-open':
       return '';
     default:
       return '';
@@ -1460,11 +1948,33 @@ export class LauncherPalette {
 
   _onKeyPress(event) {
     const key = event.get_key_symbol();
+    if (this._mode === 'history-rename') {
+      if (key === Clutter.KEY_Return || key === Clutter.KEY_KP_Enter) {
+        const title = this._entry.get_text().trim();
+        const id = this._historyConversation?.id;
+        if (id && title) {
+          historyRename(id, title).then(() => {
+            if (!this._isOpen)
+              return;
+            if (this._historyConversation)
+              this._historyConversation.title = title;
+            this._openHistoryConversation(id);
+          }).catch(() => {});
+        }
+        return Clutter.EVENT_STOP;
+      }
+      return Clutter.EVENT_PROPAGATE;
+    }
     if (this._mode === 'writing-question') {
       if (key === Clutter.KEY_Return || key === Clutter.KEY_KP_Enter) {
         const question = this._entry.get_text().trim();
         if (!question)
           return Clutter.EVENT_STOP;
+        if (this._writingAction?.contextual && !this._writingContext?.token) {
+          this._captureThenStart(this._writingAction.key === 'continue' ? 'continue'
+            : this._writingAction.scope ?? 'sentence', question);
+          return Clutter.EVENT_STOP;
+        }
         this._startWritingRequest(this._writingAction, question);
         return Clutter.EVENT_STOP;
       }
@@ -1473,14 +1983,29 @@ export class LauncherPalette {
 
     if (this._mode !== 'launcher' && this._mode !== 'writing-actions') {
       if (key === Clutter.KEY_Escape) {
-        if (this._mode === 'writing-done') {
-          this.close();
-          return Clutter.EVENT_STOP;
-        }
         this.close();
         return Clutter.EVENT_STOP;
       }
       return Clutter.EVENT_PROPAGATE;
+    }
+
+    if (this._mode === 'writing-actions') {
+      // Chip rows: arrows move within the row, Enter activates focus.
+      if (key === Clutter.KEY_Left || key === Clutter.KEY_Right) {
+        const buttons = this._writingControls.get_children();
+        const focus = global.stage.get_key_focus();
+        const index = buttons.findIndex(button => button === focus);
+        if (buttons.length && index >= 0) {
+          const next = (index + (key === Clutter.KEY_Right ? 1 : -1) + buttons.length) % buttons.length;
+          global.stage.set_key_focus(buttons[next]);
+        }
+        return Clutter.EVENT_STOP;
+      }
+      if (key === Clutter.KEY_Return || key === Clutter.KEY_KP_Enter) {
+        const focus = global.stage.get_key_focus();
+        if (focus && this._writingControls.contains(focus))
+          return Clutter.EVENT_PROPAGATE;
+      }
     }
 
     if (key === Clutter.KEY_Down) {
@@ -1549,10 +2074,27 @@ export class LauncherPalette {
 
     if (event.type() === Clutter.EventType.KEY_PRESS &&
         event.get_key_symbol() === Clutter.KEY_Escape) {
-      // From a question prompt with captured text, Escape returns to the
-      // writing actions; otherwise it closes and cancels.
+      // Escape unwinds progressively: submenu → root actions, rename → the
+      // conversation, a question prompt → the writing actions, otherwise the
+      // palette closes and cancels.
+      if (this._mode === 'writing-actions' && this._submenu) {
+        this._submenu = null;
+        this._showWritingMenuRoot();
+        return Clutter.EVENT_STOP;
+      }
+      if (this._mode === 'history-rename') {
+        if (this._historyConversation)
+          this._openHistoryConversation(this._historyConversation.id);
+        else
+          this._showHistoryList();
+        return Clutter.EVENT_STOP;
+      }
       if (this._mode === 'writing-question' && this._writingContext?.selected) {
         this._showWritingActions();
+        return Clutter.EVENT_STOP;
+      }
+      if (this._mode === 'writing-question' && this._writingAction?.contextual) {
+        this._showContextualWritingActions();
         return Clutter.EVENT_STOP;
       }
       this.close();
@@ -1600,6 +2142,10 @@ export class LauncherPalette {
 
     if (item.type === 'action-searching')
       return;
+    if (item.type === 'history-open') {
+      this._showHistoryList();
+      return;
+    }
     if (item.type === 'action') {
       this._runActionPlan(item.plan);
       return;

@@ -14,16 +14,21 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.send_response(200); self.end_headers()
             # Echo fixture: reply with exactly the marked span, proving what
-            # the pipeline actually delivered to the provider.
+            # the pipeline actually delivered to the provider. Checked first:
+            # quoted conversation history may legitimately contain the other
+            # fixture keywords below.
+            # Fixture keywords must match the actual request (the prompt's
+            # first line), never the quoted conversation history that follows.
+            first_line = prompt.splitlines()[0] if prompt else ''
             marker = 'EchoFixture:'
             if marker in prompt:
                 text = prompt.rsplit(marker, 1)[1].strip().splitlines()[0].strip()
+            elif 'Markdown fixture' in first_line and body.get('stream'):
+                text = '# Attention\n\n- Compare queries and keys.\n- Scale the scores.\n\nUse `softmax` to obtain weights.\n\n```python\nweights = softmax(scores)\n```\n\n[GNOME](https://www.gnome.org/)'
+            elif 'Follow-up fixture' in first_line and body.get('stream'):
+                text = 'The previous answer discussed attention.'
             else:
                 text = 'Fixture answer. ' * 120 if body.get('stream') else 'selected phrase revised 🌙'
-            if body.get('stream') and 'Markdown fixture' in prompt:
-                text = '# Attention\n\n- Compare queries and keys.\n- Scale the scores.\n\nUse `softmax` to obtain weights.\n\n```python\nweights = softmax(scores)\n```\n\n[GNOME](https://www.gnome.org/)'
-            if body.get('stream') and 'Follow-up fixture' in prompt:
-                text = 'The previous answer discussed attention.'
             if body.get('stream'):
                 for index in range(0, len(text), 180):
                     self.wfile.write((json.dumps({'done': False, 'message': {'content': text[index:index+180]}})+'\n').encode())

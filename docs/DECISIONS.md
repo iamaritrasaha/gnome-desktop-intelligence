@@ -1,6 +1,93 @@
 # Decisions
 
 
+## 2026-09-25 — Phase 5: Writing Intelligence, predictive writing, Ask UX and history
+
+The user authorized a single pass covering predictive writing, the Writing
+Tools redesign and the Ask Intelligence UX/history overhaul, with the
+existing architecture, native GNOME styling, provider abstraction, safety
+checks, Intelligence mark and deterministic launcher preserved. IBus/browser
+writing research stays deferred.
+
+**Prediction is its own capability, not a third proofreading mode.** The
+Continue prompt, structured-output schema, quality gate and pacing live in
+`prediction.py`/`router.run_prediction` and never touch the correction
+algebra. The trigger reuses the passive observer's event stream because that
+is the only sanctioned way to know a user paused in a supported field, but it
+is a separate state machine: 500 ms pause, 2.5 s minimum interval,
+end-of-text caret, ≥30 chars/6 words of context, no per-keystroke calls,
+aggressive cancellation, and a freshness re-check before showing anything
+that arrives after continued typing.
+
+**The gate, not the model, decides what is worth showing.** Echoes (any
+4-word run already present, or a continuation starting with the source's
+final words), one-word/trivial completions, >160 chars, commentary openings,
+Markdown syntax, braces, URLs/emails/paths and multi-line output are all
+suppressed deterministically. False negatives are preferred to an unwanted
+interruption, consistent with the passive gate philosophy.
+
+**Ghost text is a service-anchored surface, not fake inline text.** GNOME
+cannot draw inside another application's text view, so the continuation
+renders as a compact headerless surface at the caret with visibly secondary
+styling; the task explicitly prefers this over pretending the text is
+inline. Keyboard acceptance is deliberately limited: full Tab acceptance
+only where Tab is safe (GTK multiline, the same gate as passive Tab), Right
+for one word behind its own configurable key, Escape always. Two concrete
+races were found by the nested suites and fixed at the source rather than
+worked around: the anchor-request expiry armed for the first (failed)
+extents attempt survived the successful retry and killed fresh ghosts
+(`set_anchor` now drops both feature timers), and the input method's final
+typing caret event dismissed a ghost anchored at that very position —
+prediction staleness now belongs entirely to the service, which sees the
+real AT-SPI caret offset and hides stale ghosts through `PassiveHidden`.
+Dismissal always notifies the Shell: a visible surface without a live
+prediction behind it is a bug.
+
+**Undo after prediction acceptance expects the post-insert caret.** The
+guarded undo verification is caret-sensitive; the full-accept path now
+records the post-insert caret position (and sets it), so Ctrl+Alt+Z works
+where the naive expectation (caret unchanged) would refuse every undo.
+
+**Writing Tools move from a list to a surface with progressive disclosure.**
+Pure, node-testable `WritingMenu.js` holds the structure: Improve, Fix,
+Shorten, Tone, More… with Tone (Professional/Casual/Friendly/Direct) and
+More (Expand/Summarize/Explain/Translate/Ask Intelligence) behind explicit
+expansion. No-selection support uses a new explicit capture
+(`GetCaretContext`) — the sentence/paragraph at the caret is read only when
+the user actually picks an action, bounded and fail-closed, GTK multiline
+only. `continue` captures the sentence as model context but inserts its
+result at the caret through an insert-mode context; on-demand Continue and
+ghost prediction share the router action but not the gates. Typed free text
+on the contextual surface keeps launcher routing so `ask`-prefix and
+insert-at-caret semantics stay exactly as validated in Phase 3.5.
+
+**Ask keeps the launcher's 500 px and gains real reading layout.** Width is
+fixed through every state; height grows to a work-area-relative maximum
+then scrolls internally. The processing animation replaces textual
+"Generating…" indicators, and streaming is buffered (`stableStreamView` +
+`StreamRenderer`): completed lines render as native Markdown blocks, the
+partial tail is plain text or hidden while it holds raw syntax, and the
+first delta retires the animation. Code blocks scroll horizontally with
+their own Copy control rather than widening anything.
+
+**History is local-first and default-on by explicit instruction.** The
+service owns persistence (assistant turns are written when the request
+completes, so a crash cannot lose them); the schema keeps only visible
+conversation content, auto titles and minimal metadata; messageless rows are
+housecleaned and the store keeps 200 conversations. `save-intelligence-history`
+is enforced service-side — disabling it makes new interactions temporary and
+deletes nothing; clearing is always explicit. Retry trims the trailing
+assistant turn instead of duplicating it. Selection-Ask persists the
+question and answer but not the selection text itself.
+
+**Validation lesson:** fixture mocks that match keywords anywhere in the
+prompt misfire once conversation history legitimately contains those words —
+match the actual request line. And a D-Bus signature change must be made in
+the introspection XML too; the nested runtime caught the `(bis)`→`(bbis)`
+mismatch as a silent ConfigurePassive failure that disabled the whole
+observer.
+
+
 ## 2026-09-25 — Phase 4: native GNOME actions with a closed registry
 
 The user authorized Phase 4 (native GNOME actions), paused all further

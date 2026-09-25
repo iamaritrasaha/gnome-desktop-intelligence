@@ -281,6 +281,139 @@ class SelectionContext:
             self._contexts[token] = empty
             return empty
 
+    SENTINEL_BACK = {'sentence': 600, 'paragraph': 1000}
+    SENTINEL_FORWARD = {'sentence': 200, 'paragraph': 300}
+    MAX_CARET_TEXT = {'sentence': 600, 'paragraph': 800}
+
+    def _capture_caret_context(self, pid=0, kind='sentence'):
+        """Explicit-action capture for a field with no selection: the bounded
+        sentence or paragraph at the caret in an eligible GTK multiline editor.
+        Only runs on an explicit user action; unsupported fields fail closed."""
+        self._prune_contexts()
+        token = secrets.token_urlsafe(24)
+        empty = {
+            "token": token, "selected": "", "nearby": "", "application": "",
+            "role": "", "start": -1, "end": -1, "caret": -1,
+            "created": time.monotonic(), "accessible": None, "editable": False,
+            "stale": False,
+        }
+        if kind not in self.SENTINEL_BACK:
+            self._contexts[token] = empty
+            return empty
+        accessible, focus_reason = self._focused_editable(pid) if pid > 0 else (None, "none")
+        empty = {**empty, "focus_reason": focus_reason}
+        if accessible is None:
+            self._contexts[token] = empty
+            return empty
+        try:
+            app = accessible.get_application()
+            toolkit = app.get_toolkit_name() if app else ''
+            # Same eligibility family as passive observation: GTK multiline
+            # editors only; Gecko and GTK4 single-line fields fail closed.
+            eligible = (self._editable(accessible) and toolkit == 'GTK'
+                        and accessible.get_state_set().contains(Atspi.StateType.MULTI_LINE))
+            if not eligible:
+                self._contexts[token] = empty
+                return empty
+            caret = int(Atspi.Text.get_caret_offset(accessible))
+            length = Atspi.Text.get_character_count(accessible)
+            if caret <= 0 or caret > length:
+                self._contexts[token] = empty
+                return empty
+            back = self.SENTINEL_BACK[kind]
+            forward = self.SENTINEL_FORWARD[kind]
+            window_start = max(0, caret - back)
+            window_end = min(length, caret + forward)
+            if not self._public_text_range(accessible, max(0, window_start - 32), min(length, window_end + 32)):
+                self._contexts[token] = empty
+                return empty
+            before = Atspi.Text.get_text(accessible, window_start, caret)
+            after = Atspi.Text.get_text(accessible, caret, window_end)
+            bounds = self._caret_text_bounds(kind, before, after, window_start == 0, window_end == length)
+            if not bounds:
+                self._contexts[token] = empty
+                return empty
+            start, end = caret - len(before) + bounds[0], caret + bounds[1]
+            text = Atspi.Text.get_text(accessible, start, end)
+            if not text or not text.strip() or len(text) > self.MAX_CARET_TEXT[kind]:
+                self._contexts[token] = empty
+                return empty
+            application = ""
+            try:
+                application = (app.get_name() or "")[:128]
+            except Exception:
+                pass
+            captured = {
+                **empty,
+                "application": application,
+                "role": Atspi.Role.get_name(accessible.get_role()) or '',
+                "caret": caret,
+                "accessible": accessible,
+                "editable": True,
+                "caret_range": True,
+                "selected": text,
+                "start": start,
+                "end": end,
+                "length": length,
+                "before": Atspi.Text.get_text(accessible, max(0, start - 32), start),
+                "after": Atspi.Text.get_text(accessible, end, min(length, end + 32)),
+                "nearby": json.dumps({"before": "", "after": ""}),
+            }
+            captured["nearby"] = json.dumps({"before": captured["before"], "after": captured["after"]},
+                                            ensure_ascii=False)
+            self._contexts[token] = captured
+            self._watch_context(captured)
+            return captured
+        except Exception:
+            self._contexts[token] = empty
+            return empty
+
+    @staticmethod
+    def _caret_text_bounds(kind, before, after, at_window_start, at_text_end):
+        """(start, end) as caret-relative offsets, or None when the
+        sentence/paragraph cannot be determined from the bounded window."""
+        terminators = '.!?'
+        if kind == 'paragraph':
+            start = before.rfind('\n')
+            if start == -1 and not at_window_start:
+                return None
+            start = start + 1
+            end = after.find('\n')
+            if end == -1 and not at_text_end:
+                return None
+            end = len(after) if end == -1 else end
+            return (start - len(before), end) if end - start >= 1 else None
+        # Sentence: start after the last terminator/newline before the caret.
+        start = -1
+        for index in range(len(before) - 1, -1, -1):
+            char = before[index]
+            if char == '\n' and (index == 0 or before[index - 1] == '\n' or
+                                 index + 1 >= len(before) or before[index + 1] in ' \n\t'):
+                start = index + 1
+                break
+            if char in terminators and (index + 1 >= len(before) or before[index + 1] in ' \n\t'):
+                start = index + 1
+                break
+        if start == -1 and not at_window_start:
+            return None
+        if start == -1:
+            start = 0
+        end = None
+        for index, char in enumerate(after):
+            if char == '\n':
+                end = index
+                break
+            if char in terminators and (index + 1 >= len(after) or after[index + 1] in ' \n\t'):
+                end = index + 1
+                break
+        if end is None:
+            if not at_text_end:
+                return None
+            end = len(after)
+        if end - start < 1:
+            return None
+        return (start - len(before), end)
+
     def _selection_is_current(self, context, start, end, expected):
         accessible = context["accessible"]
         try:
@@ -296,7 +429,7 @@ class SelectionContext:
             if not self._public_text_range(accessible, max(0, start - len(context['before'])), end + len(context['after'])):
                 return False
             count = Atspi.Text.get_n_selections(accessible)
-            if context.get("passive") or context.get("insert"):
+            if context.get("passive") or context.get("insert") or context.get("caret_range"):
                 return (count == 0 and states.contains(Atspi.StateType.FOCUSED)
                         and Atspi.Text.get_caret_offset(accessible) == context["caret"]
                         and Atspi.Text.get_text(accessible, start, end) == expected

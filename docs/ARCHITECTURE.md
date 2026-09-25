@@ -320,6 +320,132 @@ cancellation, latency and listener/timer counters. Neither API polls or runs
 model work. Diagnostics are not displayed as normal response chrome. See
 CURRENT_STATE for actual measured timings and remaining physical tests.
 
+## Phase 5: Writing Intelligence, predictive writing and Ask UX/history
+
+### Predictive writing (Continue mode)
+
+Predictive writing is a distinct Writing Intelligence capability with its own
+prompt, gate, pacing and surface — never shared with Correct (proofreading)
+or Rewrite. The observer in `passive.py` schedules a prediction on every text
+change in an eligible field; a 500 ms pause, a 2.5 s minimum interval between
+predictions, a caret at the very end of the text, and a useful-context
+minimum (`prediction_source`: ≥30 chars, ≥6 words, no code markers) gate the
+single quick-model request. There is no per-keystroke model call: a typing
+burst produces at most one request, and continued typing cancels the
+in-flight request and restarts the pause.
+
+`router.run_prediction` asks a structured-output schema
+(`{"continuation": string}`) with the quick model, ≤96 output tokens and an
+8 s timeout. The answer passes `prediction.clean_prediction` before it can be
+shown: multi-line output is cut to its first line; commentary openings,
+Markdown syntax (`*_#[]>~\``), braces/JSON, URLs, email and paths are
+rejected; one-word and trivial completions are suppressed; any 4-word run
+copied from the source, and any continuation beginning with the source's
+final words, is treated as an echo and dropped; length is capped at 160
+characters and 28 words; leading whitespace is normalized to the exact
+source. A model producing text is never a suggestion.
+
+Before display the trigger re-verifies freshness (`_prediction_current`): the
+same field focused, caret and length unchanged — a prediction that arrives
+after the user kept typing is discarded. The ghost renders as a compact
+headerless, buttonless surface (subdued italic text + hint line) anchored at
+the caret through the shared anchor resolution. Tab (GTK multiline only) or
+Ctrl+Alt+Enter accepts the whole continuation; Right accepts exactly one
+word (`prediction-word-key`); Escape dismisses; typing, real caret movement
+or focus changes dismiss it. Acceptance reuses the guarded caret-range
+editor (`_replace` with an insert context): the insertion is verified, the
+remainder stays as ghost text re-anchored at the new caret, and a short
+guarded undo watch offers Ctrl+Alt+Z (an immediate undo is recorded as a
+negative signal).
+
+The service owns prediction staleness. The Shell never hides a ghost on
+input-method caret events — the service sees the real AT-SPI caret offset
+and distinguishes the final typing echo (same offset) from navigation
+(different offset), hiding stale ghosts through `PassiveHidden`. Dismissals
+always notify the Shell, so a surface is never visible without a live
+prediction behind it. Learning signals (labels only, no text) extend the
+existing store: `prediction` rows with accepted/partial/dismissed/ignored/
+immediate_undo; five-plus recent signals totalling ≤ −3 suppress predictions
+for that application; acceptance rates feed `LearningStats.predictions`.
+
+### Compact contextual Writing Tools
+
+The plain launcher list is replaced by a compact contextual surface
+(`src/intelligence/WritingMenu.js` holds the pure, node-testable structure).
+With a selection the surface shows a subdued selection preview and one chip
+row: Improve, Fix, Shorten, Tone, More…. Tone expands to Professional,
+Casual, Friendly, Direct; More expands to Expand, Summarize, Explain,
+Translate, Ask Intelligence; both expose Back, and Escape unwinds a submenu
+before closing. Without a selection but with `canReadCaretContext`
+(editable GTK multiline, non-secret, non-Gecko), the surface offers
+caret-scoped actions — Improve sentence, Continue writing, Fix paragraph,
+Tone, More… — gated by the capability snapshot (Continue requires insertion
+capability); unsupported targets keep the plain launcher with its capture
+note. Typed selection intents keep the established verb-stripping semantics;
+typed free text on the contextual surface keeps plain launcher routing.
+
+No-selection actions capture the sentence/paragraph at the caret on the
+explicit user action only: `GetCaretContext(pid, kind)` in `selection.py`
+bounds the window (600/200 chars sentence, 1000/300 paragraph), requires the
+public-text attribute-run check, and fails closed when a boundary cannot be
+determined. `continue` captures the sentence ending at the caret as model
+context but builds an insert-mode context (start = end = caret) so the
+result is inserted at the caret via the guarded editor. Activation failures
+are visible messages, never silent no-ops. Choosing an action transforms the
+same surface into the existing diff/Markdown preview with Replace primary,
+Copy/Retry/Cancel secondary and guarded Undo after acceptance.
+
+### Ask Intelligence layout, streaming and history
+
+The palette stays 500 px with a stable top edge and horizontal center in
+every Ask state; the content area grows with content up to a
+work-area-relative maximum (60% of the available work area, clamped to
+220–520 px) and scrolls internally afterwards. While waiting for the first
+meaningful content, a small native processing animation (Intelligence mark +
+three pulsing dots, static under reduced motion) holds the surface — no
+"Generating…" text and no raw Markdown.
+
+Streaming is buffered by `Presentation.stableStreamView`: only completed
+lines become rendered Markdown blocks (incrementally kept by
+`ResponseView.StreamRenderer`); the trailing partial line renders as plain
+text — and is hidden entirely while it still contains raw syntax tokens — so
+`#`, `**`, backticks or list markers never flash. The first delta stops the
+processing animation. Completed responses render through `addMarkdown`:
+headings, lists, bold/italic, inline code, fenced code in distinct blocks
+that scroll horizontally instead of widening anything, each with its own
+Copy control, and safe, deliberately activated HTTP(S) links. The user's
+question stays visible but subdued above the answer.
+
+Every Ask interaction belongs to a conversation. The palette persists the
+user turn on submission (`HistoryStart`/`HistoryAdd`); the service persists
+the assistant turn when the request (which now carries a conversation id)
+completes, so persistence survives client crashes. Retry trims the trailing
+assistant turn first. Conversations are stored in a local SQLite database
+(`history.py`, 0700/0600, `~/.local/share/gnome-desktop-intelligence/
+history.sqlite3`) with `conversations` (id, auto title from the first user
+question, timestamps, model metadata) and `messages` (conversation_id, role,
+content, timestamp). Only user-visible content and metadata are stored — no
+internal prompts, routing metadata or hidden reasoning. Messageless rows are
+housecleaned after an hour; the store keeps the 200 newest conversations.
+Writes happen only while `save-intelligence-history` is enabled (enforced in
+the service, not just the UI); disabling keeps new interactions temporary
+and never deletes existing history; Clear is explicit (Preferences and the
+history list).
+
+History is reachable from the panel menu ("Intelligence History") and the
+`history` palette command. The list groups conversations Today / Yesterday /
+Earlier with title, message count and question preview; opening one restores
+the messages for reading (Markdown rendered) and Continue resumes the same
+conversation id with the bounded RAM context rebuilt from the stored turns;
+Rename, Delete and Clear All (two-step) are provided. Closing the palette or
+Clear/New Conversation never deletes stored history.
+
+Diagnostics stay bounded and content-free: `RequestStats` records
+question length, conversation id and persistence status; `PassiveStats`
+gains prediction counters (requests, shown, gate suppressions, staleness,
+cancellation, insert refusals, latency) and the stage trace records
+prediction stages with decisions but never text.
+
 ## Phase 4: native action registry, routing and execution
 
 ```text

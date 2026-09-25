@@ -18,6 +18,7 @@ from gi.repository import Atspi, Gio, GLib
 from router import ModelRouter, normalize_intent_response
 from selection import SelectionContext
 from learning import LearningStore
+from history import HistoryStore
 from passive import PassiveWriting
 from pathlib import Path
 from providers.base import ProviderError
@@ -44,6 +45,36 @@ INTROSPECTION_XML = """
       <arg type="i" name="caret_offset" direction="out"/>
       <arg type="b" name="editable" direction="out"/>
       <arg type="s" name="capabilities" direction="out"/>
+    </method>
+    <method name="GetCaretContext">
+      <arg type="i" name="pid" direction="in"/>
+      <arg type="s" name="kind" direction="in"/>
+      <arg type="s" name="token" direction="out"/>
+      <arg type="s" name="selected_text" direction="out"/>
+      <arg type="s" name="nearby_context" direction="out"/>
+      <arg type="s" name="application" direction="out"/>
+      <arg type="s" name="role" direction="out"/>
+      <arg type="i" name="start_offset" direction="out"/>
+      <arg type="i" name="end_offset" direction="out"/>
+      <arg type="i" name="caret_offset" direction="out"/>
+      <arg type="b" name="editable" direction="out"/>
+      <arg type="s" name="capabilities" direction="out"/>
+    </method>
+    <method name="AcceptPrediction">
+      <arg type="s" name="token" direction="in"/>
+      <arg type="i" name="words" direction="in"/>
+      <arg type="b" name="success" direction="out"/>
+      <arg type="s" name="message" direction="out"/>
+    </method>
+    <method name="HistoryStart"><arg type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="HistoryAdd"><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="s" direction="in"/></method>
+    <method name="HistoryTrim"><arg type="s" direction="in"/><arg type="s" direction="in"/></method>
+    <method name="HistoryList"><arg type="s" direction="out"/></method>
+    <method name="HistoryGet"><arg type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="HistoryRename"><arg type="s" direction="in"/><arg type="s" direction="in"/></method>
+    <method name="HistoryDelete"><arg type="s" direction="in"/></method>
+    <method name="HistoryClear">
+      <arg type="b" name="success" direction="out"/>
     </method>
     <method name="ReleaseContext"><arg type="s" direction="in"/></method>
     <method name="ProviderStatus"><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="s" direction="out"/></method>
@@ -90,7 +121,7 @@ INTROSPECTION_XML = """
     <method name="PurgeLearningExamples"/>
     <signal name="PassiveSuggestion"><arg type="s"/></signal>
     <signal name="PassiveHidden"><arg type="s"/></signal>
-    <method name="ConfigurePassive"><arg type="b" direction="in"/><arg type="i" direction="in"/><arg type="s" direction="in"/></method>
+    <method name="ConfigurePassive"><arg type="b" direction="in"/><arg type="b" direction="in"/><arg type="i" direction="in"/><arg type="s" direction="in"/></method>
     <method name="AcceptPassive"><arg type="s" direction="in"/><arg type="b" direction="out"/><arg type="s" direction="out"/></method>
     <method name="DismissPassive"><arg type="s" direction="in"/></method>
     <method name="UndoPassive"><arg type="s" direction="in"/><arg type="b" direction="out"/><arg type="s" direction="out"/></method>
@@ -115,7 +146,7 @@ INTROSPECTION_XML = """
 _stream_method = INTROSPECTION_XML.split('<method name="Transform">', 1)[1].split('</method>', 1)[0]
 _stream_method = _stream_method.replace('<arg type="s" name="response" direction="out"/>',
     '<arg type="s" name="request_id" direction="in"/><arg type="s" name="history" direction="in"/>'
-    '<arg type="s" name="response" direction="out"/>')
+    '<arg type="s" name="conversation_id" direction="in"/><arg type="s" name="response" direction="out"/>')
 INTROSPECTION_XML = INTROSPECTION_XML.replace('</interface>',
     '<method name="TransformStream">' + _stream_method + '</method>'
     '<signal name="ResponseChunk"><arg type="s"/><arg type="s"/><arg type="s"/></signal>'
@@ -139,6 +170,7 @@ class GdiService(SelectionContext):
         self._requests = {}
         self._action_stats = []
         self._route_actions = 0
+        self._history = None
         self._owner_signal = connection.signal_subscribe(
             "org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged",
             "/org/freedesktop/DBus", None, Gio.DBusSignalFlags.NONE,
@@ -171,6 +203,13 @@ class GdiService(SelectionContext):
             if request.get("owner") == name:
                 self._cancel_transform(token)
 
+    def _history_store(self):
+        """Lazily opened: no history database I/O happens until a client uses
+        the History feature."""
+        if self._history is None:
+            self._history = HistoryStore()
+        return self._history
+
     def _capabilities_for(self, context):
         """Derive the focused element's writing capabilities from the raw
         snapshot. Metadata only; no text and no secrets are reported."""
@@ -196,6 +235,10 @@ class GdiService(SelectionContext):
                 caps["canObserveTyping"] = self._passive.supports_field(context)
             except Exception:
                 caps["canObserveTyping"] = False
+        # The same eligibility family (GTK multiline, non-secret, editable)
+        # governs reading the sentence/paragraph at the caret on an explicit
+        # no-selection writing action.
+        caps["canReadCaretContext"] = caps["canObserveTyping"]
         if context.get("focus_reason") == "secret":
             caps["reason"] = "protected-field"
         elif accessible is None:
@@ -212,10 +255,57 @@ class GdiService(SelectionContext):
         try:
             args = parameters.unpack()
             if method == 'ConfigurePassive':
-                geometry = json.loads(args[2])
+                geometry = json.loads(args[3])
                 if not isinstance(geometry, dict): raise ValueError('Invalid window geometry')
-                self._passive.configure(_sender, args[0], args[1], geometry)
+                self._passive.configure(_sender, args[0], args[1], args[2], geometry)
                 invocation.return_value(GLib.Variant('()', ()))
+            elif method == 'GetCaretContext':
+                self._passive.dismiss('explicit')
+                context = self._capture_caret_context(args[0], args[1] if args[1] in ('sentence', 'paragraph') else 'sentence')
+                context["owner"] = _sender
+                context["expiry_id"] = GLib.timeout_add_seconds(CONTEXT_LIFETIME_SECONDS, lambda: self._expire_context(context["token"]))
+                invocation.return_value(GLib.Variant(
+                    "(sssssiiibs)", (
+                        context["token"], context["selected"], context["nearby"],
+                        context["application"], context["role"],
+                        context["start"], context["end"], context["caret"], context["editable"],
+                        json.dumps(self._capabilities_for(context)),
+                    )))
+            elif method == 'AcceptPrediction':
+                if self._passive.owner != _sender: raise ValueError('Passive session belongs to another client')
+                success, message = self._passive.accept_prediction(args[0], args[1])
+                invocation.return_value(GLib.Variant('(bs)', (success, message)))
+            elif method == 'HistoryStart':
+                if not self._settings.get_boolean('save-intelligence-history'):
+                    invocation.return_value(GLib.Variant('(s)', ('',)))
+                    return
+                invocation.return_value(GLib.Variant(
+                    '(s)', (self._history_store().start_conversation(args[0][:128]),)))
+            elif method == 'HistoryAdd':
+                if self._settings.get_boolean('save-intelligence-history'):
+                    self._history_store().add_message(args[0], args[1], args[2])
+                invocation.return_value(GLib.Variant('()', ()))
+            elif method == 'HistoryTrim':
+                if self._settings.get_boolean('save-intelligence-history'):
+                    self._history_store().trim(args[0], args[1])
+                invocation.return_value(GLib.Variant('()', ()))
+            elif method == 'HistoryList':
+                invocation.return_value(GLib.Variant(
+                    '(s)', (json.dumps(self._history_store().list_conversations()),)))
+            elif method == 'HistoryGet':
+                invocation.return_value(GLib.Variant(
+                    '(s)', (json.dumps(self._history_store().get_conversation(args[0]) or {}),)))
+            elif method == 'HistoryRename':
+                self._history_store().rename(args[0], args[1])
+                invocation.return_value(GLib.Variant('()', ()))
+            elif method == 'HistoryDelete':
+                self._history_store().delete(args[0])
+                invocation.return_value(GLib.Variant('()', ()))
+            elif method == 'HistoryClear':
+                success = True
+                if self._history is not None:
+                    success = self._history.clear()
+                invocation.return_value(GLib.Variant('(b)', (success,)))
             elif method == 'SetPassiveAnchor':
                 if self._passive.owner != _sender: raise ValueError('Wrong passive owner')
                 self._passive.set_anchor(args[0], json.loads(args[1]))
@@ -227,7 +317,9 @@ class GdiService(SelectionContext):
             elif method in ('AcceptPassive', 'UndoPassive', 'DismissPassive'):
                 if self._passive.owner != _sender: raise ValueError('Passive session belongs to another client')
                 if method == 'DismissPassive':
-                    self._passive.dismiss(args[0] if args[0] in ('dismissed', 'focus', 'explicit') else 'dismissed')
+                    reason = args[0] if args[0] in ('dismissed', 'focus', 'explicit') else 'dismissed'
+                    self._passive.dismiss(reason)
+                    self._passive.dismiss_prediction(reason)
                     invocation.return_value(GLib.Variant('()', ()))
                 else:
                     def passive_edit():
@@ -335,7 +427,8 @@ class GdiService(SelectionContext):
             elif method in ("Transform", "TransformStream"):
                 self._start_transform(args[:14], invocation, _sender,
                     args[14] if method == 'TransformStream' else None,
-                    json.loads(args[15]) if method == 'TransformStream' else None)
+                    json.loads(args[15]) if method == 'TransformStream' else None,
+                    args[16] if method == 'TransformStream' else None)
             elif method == 'RequestStats':
                 invocation.return_value(GLib.Variant('(s)', (json.dumps({'recent': self._request_stats, 'active': len(self._requests)}),)))
             elif method == "ReleaseContext":
@@ -427,7 +520,7 @@ class GdiService(SelectionContext):
             raise ProviderError("GDI could not read a selected text range in this field.")
         return context
 
-    def _start_transform(self, args, invocation, sender, request_id=None, history=None):
+    def _start_transform(self, args, invocation, sender, request_id=None, history=None, conversation_id=None):
         (token, action, selected, nearby, question, provider, endpoint,
          quick_model, intent_model, assistant_model, reasoning_model, timeout, context_tokens, output_tokens) = args
         self._check_owner(token, sender)
@@ -439,6 +532,8 @@ class GdiService(SelectionContext):
             raise ProviderError("Standalone requests cannot include hidden selection context.")
         if request_id is not None and (not request_id or len(request_id) > 64):
             raise ProviderError('Invalid request identifier.')
+        if conversation_id is not None and len(conversation_id) > 64:
+            raise ProviderError('Invalid conversation identifier.')
         if len(self._requests) >= 4 and token not in self._requests:
             raise ProviderError("GDI is busy. Cancel an existing request first.")
         if token in self._requests:
@@ -452,7 +547,8 @@ class GdiService(SelectionContext):
         request["started"] = started
         request["action"] = action
         first_token = None
-        route = 'quick' if action in ('proofread', 'rewrite', 'concise', 'expand', 'professional', 'casual', 'translate') else 'reasoning' if action == 'harder' else 'assistant'
+        route = 'quick' if action in ('proofread', 'rewrite', 'concise', 'expand', 'professional',
+                                      'casual', 'friendly', 'direct', 'continue', 'translate') else 'reasoning' if action == 'harder' else 'assistant'
         def chunk(delta):
             nonlocal first_token
             if self._requests.get(token) is not request or cancellable.is_cancelled():
@@ -466,9 +562,20 @@ class GdiService(SelectionContext):
             if self._requests.get(token) is not request:
                 return
             self._requests.pop(token, None)
+            persisted = None
+            # Assistant answers land in the local conversation only when the
+            # request carried a conversation id and history saving is enabled.
+            if (not error and response and conversation_id and action in ('assistant', 'harder', 'ask', 'explain', 'summarize', 'keypoints')
+                    and self._settings.get_boolean('save-intelligence-history')):
+                try:
+                    persisted = self._history_store().add_message(conversation_id, 'assistant', response)
+                except Exception:
+                    persisted = False
             self._request_stats.append({'action': action, 'route': route,
                 'model': {'quick': quick_model, 'assistant': assistant_model, 'reasoning': reasoning_model}[route],
                 'first_token_ms': first_token, 'total_ms': round((time.monotonic() - started) * 1000),
+                'question_chars': len(question or ''),
+                'conversation_id': conversation_id or None, 'persisted': persisted,
                 'status': 'error' if error else 'complete'})
             self._request_stats[:] = self._request_stats[-50:]
             if error is not None:

@@ -36,3 +36,38 @@ assert(!markdownBlocks('[Bad](https://user@evil.org)')[0].uri);
 const {preferAssistant} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 assert(preferAssistant('why does attention use scaling', ['Attention']));
 assert(!preferAssistant('firefox', ['Firefox']));
+
+// Streaming Markdown hygiene: completed lines are stable, the partial tail is
+// suppressed while it still contains raw syntax tokens.
+const {stableStreamView, historyGroups} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+let view = stableStreamView('# Attention\n\n- Compare qu');
+assert.equal(view.stable, '# Attention\n');
+assert.equal(view.tail, ''); // tail starts a list: hidden until the line completes
+view = stableStreamView('# Attention\n\nUse softmax to obtain ');
+assert.equal(view.stable, '# Attention\n');
+assert.equal(view.tail, 'Use softmax to obtain ');
+view = stableStreamView('Use `softmax` to ob');
+assert.equal(view.tail, ''); // partial inline code never flashes
+view = stableStreamView('weights = **soft');
+assert.equal(view.tail, ''); // partial bold never flashes
+view = stableStreamView('plain tail with no markers');
+assert.equal(view.tail, 'plain tail with no markers');
+assert.deepEqual(stableStreamView(''), {stable: '', tail: ''});
+// A fenced block opened but not closed stays in the stable region.
+view = stableStreamView('```python\nweights = softmax(scores)\n');
+assert(view.stable.startsWith('```python'));
+
+// History grouping: local Today / Yesterday / Earlier buckets.
+const now = new Date('2026-09-25T15:00:00');
+const day = 86400000;
+const conversations = [
+  {id: 'a', updatedAt: now.getTime() / 1000},
+  {id: 'b', updatedAt: (now.getTime() - day + 3600000) / 1000},
+  {id: 'c', updatedAt: (now.getTime() - 5 * day) / 1000},
+];
+const groups = historyGroups(conversations, now.getTime());
+assert.deepEqual(groups.Today.map(c => c.id), ['a']);
+assert.deepEqual(groups.Yesterday.map(c => c.id), ['b']);
+assert.deepEqual(groups.Earlier.map(c => c.id), ['c']);
+assert.deepEqual(historyGroups([], now.getTime()), {Today: [], Yesterday: [], Earlier: []});
+console.log('Streaming Markdown hygiene and history grouping: PASS');
